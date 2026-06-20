@@ -1,0 +1,45 @@
+# Python runtime/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local environment and private config
+.env
+.env.*
+config.yml
+config.yaml
+
+# Personal trading data
+portfolio.csv
+trade_state.csv
+stock_pool.csv
+stock_pool.csv.bak.*
+sector_map.csv
+
+# Market data caches and generated output
+cache/
+output/
+trade_output/
+position_output/
+backtest_output/
+backtest_output_strict_t1/
+backtest_2022_now/
+bt_strict_2y_slip20/
+position_strategy_backtest_output/
+
+# Runtime backups
+pool_backups/
+portfolio_backups/
+trade_state_backups/
+backups/*
+!backups/refactor_20260620_230315/
+backups/refactor_20260620_230315/*
+!backups/refactor_20260620_230315/main.py
+
+# Logs and temporary files
+*.log
+*.tmp

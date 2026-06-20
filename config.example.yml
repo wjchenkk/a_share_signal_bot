@@ -1,0 +1,181 @@
+data:
+  start_date: "20220101"
+  end_date: ""
+  adjust: "qfq"
+  market_indices:
+    - "sh000001"
+    - "sz399001"
+  cache_dir: "cache"
+  cache_hours: 24
+  sleep_seconds: 0.20
+  use_realtime_tail: false
+  hist_providers: ["tencent", "sina", "eastmoney"]
+  spot_providers: ["akshare_em", "efinance", "tencent_direct"]
+  spot_cache_minutes: 2
+  prefer_pool_spot: true
+  two_stage_scan: true
+  max_scan_per_run: 45
+  prefilter_pool_when_gt: 60
+  prefilter_keep_pct_chg_min: -6.0
+  prefilter_keep_pct_chg_max: 8.8
+  intraday_buy_filter: true
+  intraday_snapshot_dir: "cache/intraday_snapshots"
+  index_providers: ["tencent", "eastmoney", "legacy"]
+  request_retries: 3
+  retry_backoff_seconds: [1.5, 4.0, 8.0]
+  allow_stale_cache_on_error: true
+  max_error_rate_for_valid_run: 0.20
+
+strategy:
+  min_history_days: 160
+  min_amount_ma20: 50000000
+  min_close: 3.0
+  max_close: 300.0
+  exclude_st: true
+  score_threshold: 68
+  max_positions: 8
+  max_position_pct: 0.22
+  risk_per_trade_pct: 0.010
+  atr_period: 14
+  atr_mult: 2.5
+  min_stop_pct: 0.04
+  max_stop_pct: 0.12
+  max_chase_day_pct: 7.5
+  min_day_pct: -5.5
+  avoid_upper_shadow_pct: 0.08
+  total_exposure_strong: 0.95
+  total_exposure_neutral: 0.65
+  total_exposure_weak: 0.00
+
+  # v6.1：板块主线。默认短线优先：先按概念/题材归属，缺失时用行业托底。
+  sector:
+    enabled: true
+    sector_map_path: "sector_map.csv"          # 可选手工覆盖；优先级高于自动抓取
+    auto_fill: true
+    auto_source: "concept_first"              # concept_first / concept / industry / sw / none
+    auto_fallback_sources: ["industry", "sw"] # 概念缺失时依次用东方财富行业缓存、申万一级行业托底
+    auto_write_back: true                     # 行业模式可写回 stock_pool.csv；概念模式只写缓存，避免题材固化
+    auto_map_path: "cache/auto_sector_map_concept_first.csv"
+    auto_scan_max_boards: 0                   # 0=全部；调试可设 20
+    min_sector_size: 3
+    mainline_score_threshold: 68.0
+    strong_score_threshold: 55.0
+    use_board_hist_strength: true
+    hard_gate_enabled: true
+    min_score_for_any_buy: 55.0
+    min_score_for_pullback: 66.0
+    min_score_for_breakout: 60.0
+    min_score_for_anchor: 64.0
+    front_rs20_min: 0.60
+    front_rs60_min: 0.55
+    core_rs20_min: 0.75
+    require_outperform_sector20: true
+    require_mainline_for_pullback: true
+    prefer_mainline_for_breakout: true
+
+  # v6：买点分型，不再把突破和回踩揉成一个分数。
+  setup:
+    enabled: true
+    allowed_types: ["breakout", "pullback", "volume_anchor_reaccumulation"]
+    breakout_score_threshold: 68.0
+    pullback_score_threshold: 68.0
+    anchor_score_threshold: 68.0
+    volume_anchor_lookback: 20
+    volume_anchor_min_days_ago: 3
+    volume_anchor_max_days_ago: 20
+    volume_anchor_amount_ratio: 3.0
+    volume_anchor_min_pct: 7.0
+    volume_anchor_hold_low_pct: -0.03
+    volume_anchor_midline_pct: 0.50
+    pullback_ma_options_strong: [5, 10]
+    pullback_ma_options_normal: [10, 20]
+    pullback_distance_pct: 0.035
+    breakout_amount_min: 1.08
+    breakout_amount_max: 2.60
+    pullback_amount_max: 1.15
+    reaccum_amount_min: 1.25
+    breakout_need_contraction: true
+    pullback_need_dryup: true
+    strong_mainline_pullback_ma: [5, 10]
+    normal_mainline_pullback_ma: [10, 20]
+
+  risk_gate:
+    enabled: true
+    limit_down_count_3_block: 1
+    limit_down_count_6_block: 2
+    limit_down_count_10_block: 3
+    ret3_min: -0.12
+    ret5_min: -0.18
+    drawdown10_max: -0.22
+    drawdown20_max: -0.30
+    climax_ret30: 0.80
+    climax_ret60: 1.20
+    climax_drawdown10: -0.12
+    climax_amount_ratio20: 2.8
+    min_cooling_days_after_limit_down: 5
+
+
+trade_lifecycle:
+  # 买入信号后的完整交易计划。和严格回测保持一致：T信号、T+1买入、T+1当天不卖、T+2起止损/止盈/趋势退出。
+  state_path: "trade_state.csv"
+  out_dir: "trade_output"
+  max_hold_days: 60
+  # 盘中允许按止损/1.5R/3R提示交易；MA20/MA60/大盘弱势只在收盘确认后提示次日开盘卖。
+  intraday_stop_take_profit: true
+  close_confirm_trend_exit: true
+  allow_add: true
+  add_max_position_pct: 0.18
+  add_step_pct: 0.25
+  min_trade_lot: 100
+
+position_monitor:
+  portfolio_path: "portfolio.csv"
+  out_dir: "position_output"
+  minute_period: "5"
+  minute_providers: ["eastmoney", "sina", "snapshot"]
+  minute_allow_snapshot_fallback: true
+  check_windows: ["10:00-10:30", "14:00-14:30"]
+  window_only: false
+  max_loss_pct: 0.06
+  trend_break_reduce_pct: 0.50
+  hard_stop_sell_pct: 1.00
+  profit_protect_1: 0.08
+  profit_protect_2: 0.15
+  profit_reduce_pct: 0.33
+  weak_intraday_reduce_pct: 0.33
+  allow_add: true
+  add_max_position_pct: 0.22
+  add_step_pct: 0.25
+  min_trade_lot: 100
+
+notify:
+  webhook_url: ""
+  webhook_type: "wecom"
+  send: false
+
+pool:
+  auto_prune: false
+  max_size: 50
+  prune_count: 10
+  backup_dir: "pool_backups"
+
+report:
+  include_explanations_in_message: false
+  show_no_signal_top: 12
+  max_report_stocks: 120
+  show_blocker_counts: true
+
+output:
+  cleanup_on_run: true
+  retention_days: 14
+  max_history_files: 300
+  keep_latest_files: true
+
+backtest:
+  default_account: 200000
+  years: 2
+  commission_rate: 0.0003
+  stamp_tax_rate: 0.0005
+  slippage_bps: 5
+  max_hold_days: 60
+  close_at_end: false
