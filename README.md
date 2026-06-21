@@ -411,6 +411,33 @@ REFRESH=1 ACCOUNT=200000 ETF_POOL=etf_pool.csv ./run_etf_daily.sh
 仓位分配使用带约束的风险平价：先按“轮动分/波动率”形成偏好权重，再同时满足单只ETF上限、
 资产类别上限和弱市防守仓位下限；当某只ETF触及上限时，剩余仓位会继续分配给其他合格ETF。
 
+### 基金定投计划
+
+基金定投策略是第三条独立链路：只读取开放式基金排行数据，写入 `fund_output` 和
+`cache/fund_dca`，不读写个股池、ETF 池或交易信号文件。
+
+```bash
+# 按配置生成月度定投计划
+python fund_dca.py --config config.example.yml --out fund_output --budget 5000
+
+# 通过小龙虾入口触发；预算可用环境变量覆盖
+printf '%s\n' '基金定投计划' | FUND_DCA_BUDGET=5000 ./stockbot_chat.sh
+```
+
+定投模型会先从股票型、混合型、指数型、债券型和 QDII 排行中清洗候选，排除货币/现金类、
+短债/同业存单和指定份额类别，再按近 3 年、近 1 年、近 6 月、近 3 月、近 1 月收益和持续性
+打分。入选组合按宽基/指数、主动权益、均衡混合、债券、海外 QDII 做类别配额和预算权重，
+并输出每月预算、定投周期、执行日和每期金额。输出：
+
+```text
+fund_output/latest_fund_dca_message.txt     精简摘要
+fund_output/latest_fund_dca_plan.csv        中文定投计划
+fund_output/latest_fund_dca_plan_raw.csv    原始字段计划
+fund_output/latest_fund_dca_candidates.csv  全部候选及过滤原因
+fund_output/latest_fund_dca_report.md       完整报告
+cache/fund_dca/fund_rank_TYPE_YYYYMMDD.csv  基金排行缓存
+```
+
 ## 7. 输出文件
 
 ```text

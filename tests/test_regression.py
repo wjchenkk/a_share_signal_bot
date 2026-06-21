@@ -23,6 +23,7 @@ from a_share_signal_bot import base as bot_base
 from a_share_signal_bot import etf_strategy
 from a_share_signal_bot import etf_rotation
 from a_share_signal_bot import etf_pool
+from a_share_signal_bot import fund_dca
 from a_share_signal_bot import position_monitor
 from a_share_signal_bot import trade_manager
 import a_share_signal_bot.scanner as scanner
@@ -208,6 +209,34 @@ class FailingEtfPoolFetcher:
 
     def fetch_all(self, sources):
         return pd.DataFrame(), [{"source": "eastmoney", "error": "NameResolutionError"}]
+
+
+class DeterministicFundDcaFetcher:
+    raw_rows = [
+        {"source_type": "指数型", "基金代码": "000300", "基金简称": "华夏沪深300指数A", "日期": "2026-06-18", "单位净值": "1.20", "近1月": "2.1", "近3月": "8.0", "近6月": "18.0", "近1年": "32.0", "近3年": "55.0"},
+        {"source_type": "指数型", "基金代码": "161725", "基金简称": "招商中证白酒指数A", "日期": "2026-06-18", "单位净值": "1.35", "近1月": "1.0", "近3月": "5.0", "近6月": "12.0", "近1年": "22.0", "近3年": "40.0"},
+        {"source_type": "股票型", "基金代码": "000001", "基金简称": "富国高端制造股票A", "日期": "2026-06-18", "单位净值": "1.50", "近1月": "3.0", "近3月": "9.0", "近6月": "16.0", "近1年": "28.0", "近3年": "48.0"},
+        {"source_type": "混合型", "基金代码": "001000", "基金简称": "中欧均衡成长混合A", "日期": "2026-06-18", "单位净值": "1.10", "近1月": "0.8", "近3月": "4.0", "近6月": "10.0", "近1年": "18.0", "近3年": "30.0"},
+        {"source_type": "债券型", "基金代码": "000032", "基金简称": "易方达信用债债券A", "日期": "2026-06-18", "单位净值": "1.04", "近1月": "0.4", "近3月": "1.2", "近6月": "2.8", "近1年": "5.0", "近3年": "12.0"},
+        {"source_type": "QDII", "基金代码": "000834", "基金简称": "广发纳斯达克100QDIIA", "日期": "2026-06-18", "单位净值": "2.10", "近1月": "4.0", "近3月": "7.0", "近6月": "20.0", "近1年": "35.0", "近3年": "70.0"},
+        {"source_type": "指数型", "基金代码": "009999", "基金简称": "测试现金货币A", "日期": "2026-06-18", "单位净值": "1.00", "近1月": "0.1", "近3月": "0.3", "近6月": "0.6", "近1年": "1.2", "近3年": "3.5"},
+        {"source_type": "混合型", "基金代码": "008888", "基金简称": "景顺成长混合C", "日期": "2026-06-18", "单位净值": "1.30", "近1月": "5.0", "近3月": "12.0", "近6月": "25.0", "近1年": "45.0", "近3年": "80.0"},
+    ]
+
+    def __init__(self, cfg, cache_dir: str = "", refresh: bool = False):
+        self.cfg = cfg
+        self.cache_dir = cache_dir
+        self.refresh = refresh
+
+    def fetch_all(self, sources):
+        frames = []
+        for source_type in sources:
+            raw = pd.DataFrame([r for r in self.raw_rows if r["source_type"] == source_type])
+            if not raw.empty:
+                frames.append(fund_dca.normalize_fund_rank(raw, source_type))
+        if not frames:
+            return pd.DataFrame(), []
+        return pd.concat(frames, ignore_index=True), []
 
 
 def comparable_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -1021,6 +1050,57 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertTrue((root / "etf_out" / "latest_etf_pool_report.md").exists())
             self.assertTrue((root / "etf_out" / "latest_etf_pool_errors.csv").exists())
 
+    def test_fund_dca_scores_and_allocates_diversified_plan(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["fund_dca"]["min_score"] = 30.0
+        cfg["fund_dca"]["monthly_budget"] = 6000.0
+        raw, errors = DeterministicFundDcaFetcher(cfg).fetch_all(cfg["fund_dca"]["sources"])
+        candidates = fund_dca.score_fund_candidates(raw, cfg)
+        by_code = candidates.set_index("code")
+        self.assertFalse(errors)
+        self.assertFalse(bool(by_code.loc["009999", "eligible"]))
+        self.assertFalse(bool(by_code.loc["008888", "eligible"]))
+        self.assertIn("名称排除", str(by_code.loc["009999", "exclude_reason"]))
+        self.assertIn("份额类别排除", str(by_code.loc["008888", "exclude_reason"]))
+
+        selected = fund_dca.select_dca_funds(candidates, cfg)
+        classes = set(selected["fund_class"].astype(str).tolist())
+        for expected in ["broad_index", "active_equity", "balanced", "bond", "qdii"]:
+            self.assertIn(expected, classes)
+
+        plan = fund_dca.build_dca_plan(selected, cfg, 6000.0)
+        self.assertEqual(len(plan), len(selected))
+        self.assertIn("每周", plan["period_cn"].astype(str).tolist())
+        self.assertIn("每月", plan["period_cn"].astype(str).tolist())
+        self.assertTrue((pd.to_numeric(plan["per_installment_amount"], errors="coerce") >= 100.0).all())
+        self.assertLessEqual(float(plan["monthly_amount"].sum()), 6000.0)
+        self.assertGreater(float(plan["monthly_amount"].sum()), 5600.0)
+
+    def test_fund_dca_writes_independent_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["fund_dca"]["cache_dir"] = str(root / "cache" / "fund_dca")
+            cfg["fund_dca"]["min_score"] = 30.0
+            out_dir = root / "fund_out"
+
+            old_fetcher = fund_dca.FundDcaFetcher
+            try:
+                fund_dca.FundDcaFetcher = DeterministicFundDcaFetcher
+                plan, candidates, report_path = fund_dca.run_fund_dca(cfg, out_dir, 6000.0)
+            finally:
+                fund_dca.FundDcaFetcher = old_fetcher
+
+            self.assertFalse(plan.empty)
+            self.assertGreater(len(candidates), len(plan))
+            self.assertTrue(report_path.exists())
+            self.assertTrue((out_dir / "latest_fund_dca_candidates.csv").exists())
+            self.assertTrue((out_dir / "latest_fund_dca_plan.csv").exists())
+            self.assertTrue((out_dir / "latest_fund_dca_plan_raw.csv").exists())
+            self.assertTrue((out_dir / "latest_fund_dca_message.txt").exists())
+            self.assertFalse((out_dir / "latest_signals.csv").exists())
+            self.assertIn("基金定投计划", report_path.read_text(encoding="utf-8"))
+
     def test_etf_rank_pct_direction_matches_score_semantics(self) -> None:
         values = pd.Series([0.10, 0.20, 0.30], index=["weak", "mid", "strong"])
         high_scores = etf_rotation._rank_pct(values, higher_is_better=True)
@@ -1506,12 +1586,16 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertIn("etf_pool.py", script)
         self.assertIn("etf_strategy.py", script)
         self.assertIn("etf_rotation.py", script)
+        self.assertIn("fund_dca.py", script)
         self.assertIn("ETF_POOL", script)
+        self.assertIn("FUND_DCA_BUDGET", script)
         etf_pool_pos = script.index("last_etf_pool_chat_run.log")
         etf_backtest_pos = script.index("last_etf_rotation_backtest_chat_run.log")
+        fund_dca_pos = script.index("last_fund_dca_chat_run.log")
         stock_backtest_pos = script.index("python backtest.py")
         self.assertLess(etf_pool_pos, etf_backtest_pos)
         self.assertLess(etf_backtest_pos, stock_backtest_pos)
+        self.assertLess(fund_dca_pos, stock_backtest_pos)
 
     def test_run_etf_daily_runs_signal_and_rotation(self) -> None:
         script = (ROOT / "run_etf_daily.sh").read_text(encoding="utf-8")

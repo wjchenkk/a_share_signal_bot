@@ -246,6 +246,53 @@ etf:
     benchmark_code: "510300"
 
 
+fund_dca:
+  # 基金定投策略独立于个股和ETF交易策略；只生成定投计划，不自动申购。
+  out_dir: "fund_output"
+  cache_dir: "cache/fund_dca"
+  cache_hours: 24
+  sources: ["股票型", "混合型", "指数型", "债券型", "QDII"]
+  monthly_budget: 5000
+  max_funds: 6
+  min_score: 58.0
+  min_ret_1y: -25.0
+  min_ret_3y: -45.0
+  allow_stale_cache_on_error: true
+  allowed_classes: ["broad_index", "active_equity", "balanced", "bond", "qdii"]
+  exclude_keywords: ["货币", "现金", "短债", "同业存单", "理财", "添益"]
+  exclude_share_classes: ["C"]
+  class_quotas:
+    broad_index: 2
+    active_equity: 2
+    balanced: 1
+    bond: 1
+    qdii: 1
+  class_weights:
+    broad_index: 0.35
+    active_equity: 0.25
+    balanced: 0.15
+    bond: 0.15
+    qdii: 0.10
+  period_by_class:
+    broad_index: "weekly"
+    active_equity: "weekly"
+    balanced: "biweekly"
+    bond: "monthly"
+    qdii: "biweekly"
+  weekday_by_class:
+    broad_index: "周二"
+    active_equity: "周四"
+    balanced: "周三"
+    bond: "每月5日"
+    qdii: "周三"
+  installments_per_month:
+    weekly: 4
+    biweekly: 2
+    monthly: 1
+  min_installment: 100
+  amount_step: 10
+
+
 trade_lifecycle:
   # 买入信号后的完整交易计划。和严格回测保持一致：T信号、T+1买入、T+1当天不卖、T+2起止损/止盈/趋势退出。
   state_path: "trade_state.csv"

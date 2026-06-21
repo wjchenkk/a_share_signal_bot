@@ -2,10 +2,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-mkdir -p output backtest_output position_output etf_output
+mkdir -p output backtest_output position_output etf_output fund_output
 
 ACCOUNT="${ACCOUNT:-200000}"
 ETF_POOL="${ETF_POOL:-etf_pool.csv}"
+FUND_DCA_BUDGET="${FUND_DCA_BUDGET:-5000}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
@@ -96,6 +97,20 @@ if printf '%s' "$msg" | grep -Eq 'ETF.*(信号|买点|扫描|策略)|etf.*(信�
     exit 1
   fi
   cat etf_output/latest_etf_message.txt
+  exit 0
+fi
+
+if printf '%s' "$msg" | grep -Eq '(基金.*定投|定投.*基金|定投计划|基金.*计划|fund.*dca|DCA)'; then
+  cmd=(python fund_dca.py --config config.example.yml --out fund_output --budget "$FUND_DCA_BUDGET")
+  if [ "${REFRESH:-0}" = "1" ]; then
+    cmd+=(--refresh)
+  fi
+  if ! "${cmd[@]}" > fund_output/last_fund_dca_chat_run.log 2>&1; then
+    echo "基金定投计划执行失败："
+    tail -120 fund_output/last_fund_dca_chat_run.log || true
+    exit 1
+  fi
+  cat fund_output/latest_fund_dca_message.txt
   exit 0
 fi
 

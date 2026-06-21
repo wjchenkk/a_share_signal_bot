@@ -26,6 +26,7 @@ sector_map.csv
 cache/
 output/
 etf_output/
+fund_output/
 trade_output/
 position_output/
 backtest_output/
