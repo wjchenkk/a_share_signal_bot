@@ -5,6 +5,10 @@ from .base import *
 from .etf_strategy import EtfFetcher, read_etf_pool
 from .market_data import add_indicators, safe_float
 
+ETF_ROTATION_STATE_COLUMNS = [
+    "code", "name", "status", "target_weight", "last_selected_date", "cooldown_until", "updated_at",
+]
+
 
 def classify_asset_class(name: Any, category: Any) -> str:
     text = f"{name or ''} {category or ''}".lower()
@@ -39,6 +43,143 @@ def _hist_until(hist: pd.DataFrame, as_of: Optional[pd.Timestamp]) -> pd.DataFra
     if as_of is not None:
         out = out[out["date"] <= as_of]
     return out.reset_index(drop=True)
+
+
+def _read_rotation_state(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=ETF_ROTATION_STATE_COLUMNS)
+    try:
+        df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, dtype=str, encoding="gbk")
+    if df is None or df.empty:
+        return pd.DataFrame(columns=ETF_ROTATION_STATE_COLUMNS)
+    out = df.copy()
+    for col in ETF_ROTATION_STATE_COLUMNS:
+        if col not in out.columns:
+            out[col] = ""
+    out["code"] = out["code"].map(normalize_code)
+    out = out[out["code"].astype(str).str.len() == 6].copy()
+    out["target_weight"] = pd.to_numeric(out["target_weight"], errors="coerce").fillna(0.0)
+    out["status"] = out["status"].replace("", np.nan).fillna("ACTIVE")
+    return out[ETF_ROTATION_STATE_COLUMNS].reset_index(drop=True)
+
+
+def _state_current_weights(state: pd.DataFrame) -> Dict[str, float]:
+    if state is None or state.empty:
+        return {}
+    active = state[state["status"].astype(str).str.upper().eq("ACTIVE")].copy()
+    weights: Dict[str, float] = {}
+    for _, row in active.iterrows():
+        code = normalize_code(row.get("code", ""))
+        weight = safe_float(row.get("target_weight"), 0.0)
+        if code and weight > 0:
+            weights[code] = weight
+    return weights
+
+
+def _state_cooldown_until(state: pd.DataFrame) -> Dict[str, pd.Timestamp]:
+    if state is None or state.empty:
+        return {}
+    out: Dict[str, pd.Timestamp] = {}
+    for _, row in state.iterrows():
+        code = normalize_code(row.get("code", ""))
+        until = pd.to_datetime(row.get("cooldown_until", ""), errors="coerce")
+        if code and pd.notna(until):
+            out[code] = pd.Timestamp(until)
+    return out
+
+
+def _rotation_state_path(out_dir: Path, cfg: Dict[str, Any]) -> Path:
+    rot_cfg = cfg.get("etf", {}).get("rotation", {})
+    raw = str(rot_cfg.get("state_path", "") or "").strip()
+    if not raw:
+        return out_dir / "etf_rotation_state.csv"
+    path = Path(raw)
+    return path if path.is_absolute() else Path(raw)
+
+
+def _latest_candidate_date(candidates: pd.DataFrame) -> pd.Timestamp:
+    if candidates is not None and not candidates.empty and "date" in candidates.columns:
+        dates = pd.to_datetime(candidates["date"], errors="coerce").dropna()
+        if not dates.empty:
+            return pd.Timestamp(dates.max()).normalize()
+    return pd.Timestamp(now_cn().date())
+
+
+def _cooldown_expiry_from_date(as_of: pd.Timestamp, cooldown_days: int) -> str:
+    if cooldown_days <= 0:
+        return ""
+    return (pd.Timestamp(as_of).normalize() + pd.tseries.offsets.BDay(cooldown_days)).strftime("%Y-%m-%d")
+
+
+def _write_rotation_state(
+    path: Path,
+    previous_state: pd.DataFrame,
+    positions: pd.DataFrame,
+    rel_cfg: Dict[str, Any],
+    as_of: pd.Timestamp,
+) -> None:
+    cooldown_days = int(rel_cfg.get("cooldown_days", 0) or 0)
+    previous_weights = _state_current_weights(previous_state)
+    previous_cooldown = _state_cooldown_until(previous_state)
+    selected_codes = set()
+    rows: List[Dict[str, Any]] = []
+    updated_at = now_cn().strftime("%Y-%m-%d %H:%M:%S")
+    as_of = pd.Timestamp(as_of).normalize()
+
+    if positions is not None and not positions.empty:
+        for _, row in positions.iterrows():
+            code = normalize_code(row.get("code", ""))
+            if not code:
+                continue
+            selected_codes.add(code)
+            rows.append({
+                "code": code,
+                "name": str(row.get("name", "")),
+                "status": "ACTIVE",
+                "target_weight": safe_float(row.get("target_weight"), 0.0),
+                "last_selected_date": as_of.strftime("%Y-%m-%d"),
+                "cooldown_until": "",
+                "updated_at": updated_at,
+            })
+
+    expiry = _cooldown_expiry_from_date(as_of, cooldown_days)
+    previous_lookup = previous_state.set_index("code").to_dict("index") if previous_state is not None and not previous_state.empty else {}
+    for code in sorted(set(previous_weights) - selected_codes):
+        if cooldown_days <= 0:
+            continue
+        old = previous_lookup.get(code, {})
+        rows.append({
+            "code": code,
+            "name": str(old.get("name", "")),
+            "status": "COOLDOWN",
+            "target_weight": 0.0,
+            "last_selected_date": str(old.get("last_selected_date", "")),
+            "cooldown_until": expiry,
+            "updated_at": updated_at,
+        })
+
+    if cooldown_days > 0:
+        for code, until in previous_cooldown.items():
+            if code in selected_codes or code in previous_weights:
+                continue
+            if pd.Timestamp(until).normalize() < as_of:
+                continue
+            old = previous_lookup.get(code, {})
+            rows.append({
+                "code": code,
+                "name": str(old.get("name", "")),
+                "status": "COOLDOWN",
+                "target_weight": 0.0,
+                "last_selected_date": str(old.get("last_selected_date", "")),
+                "cooldown_until": pd.Timestamp(until).strftime("%Y-%m-%d"),
+                "updated_at": updated_at,
+            })
+
+    out = pd.DataFrame(rows, columns=ETF_ROTATION_STATE_COLUMNS).drop_duplicates("code", keep="first")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False, encoding="utf-8-sig")
 
 
 def compute_rotation_candidates(
@@ -406,6 +547,8 @@ def select_rotation_positions(
     account: float,
     regime: Optional[Dict[str, Any]] = None,
     as_of: Optional[pd.Timestamp] = None,
+    current_weights: Optional[Dict[str, float]] = None,
+    cooldown_until: Optional[Dict[str, pd.Timestamp]] = None,
 ) -> pd.DataFrame:
     if candidates is None or candidates.empty:
         return pd.DataFrame()
@@ -433,8 +576,31 @@ def select_rotation_positions(
         pool = pool[~pool["asset_class"].astype(str).isin(defensive_assets)].copy()
         if pool.empty:
             return pd.DataFrame()
+    current_codes = {
+        normalize_code(code)
+        for code, weight in (current_weights or {}).items()
+        if normalize_code(code) and safe_float(weight, 0.0) > 0
+    }
+    if model == "relative_momentum" and int(rel_cfg.get("cooldown_days", 0) or 0) > 0 and cooldown_until:
+        effective_as_of = pd.Timestamp(as_of).normalize() if as_of is not None else pd.Timestamp(now_cn().date())
+        blocked_codes = set()
+        for code, until in cooldown_until.items():
+            code = normalize_code(code)
+            until_ts = pd.to_datetime(until, errors="coerce")
+            if code and pd.notna(until_ts) and code not in current_codes and effective_as_of <= pd.Timestamp(until_ts).normalize():
+                blocked_codes.add(code)
+        if blocked_codes:
+            pool = pool[~pool["code"].map(normalize_code).isin(blocked_codes)].copy()
+            if pool.empty:
+                return pd.DataFrame()
     score_col = "momentum_signal" if model == "relative_momentum" and "momentum_signal" in pool.columns else "rotation_score"
     pool["selection_score"] = pd.to_numeric(pool[score_col], errors="coerce").fillna(0.0)
+    if model == "relative_momentum":
+        turnover_cfg = rel_cfg.get("turnover_penalty", {})
+        if bool(turnover_cfg.get("enabled", False)) and current_codes:
+            min_advantage = float(turnover_cfg.get("min_score_advantage", 0.0) or 0.0)
+            if min_advantage > 0:
+                pool.loc[pool["code"].map(normalize_code).isin(current_codes), "selection_score"] += min_advantage
     if regime.get("regime") == "weak":
         pool.loc[pool["asset_class"].isin(defensive_assets), "selection_score"] += weak_defensive_bonus
     pool = pool.sort_values(["selection_score", "rotation_score"], ascending=[False, False])
@@ -517,6 +683,13 @@ def select_rotation_positions(
     out["regime"] = regime_name
     out["regime_summary"] = regime.get("summary", "")
     out["allocation_note"] = f"目标总仓位{target_exposure:.0%}；单只上限{max_position_pct:.0%}"
+    if model == "relative_momentum":
+        turnover_cfg = rel_cfg.get("turnover_penalty", {})
+        if bool(turnover_cfg.get("enabled", False)):
+            out["allocation_note"] += f"；持仓保留阈值{float(turnover_cfg.get('min_score_advantage', 0.0) or 0.0):.1%}"
+        cooldown_days = int(rel_cfg.get("cooldown_days", 0) or 0)
+        if cooldown_days > 0:
+            out["allocation_note"] += f"；卖出冷却{cooldown_days}个交易日"
     if asset_caps:
         out["allocation_note"] += "；资产类别上限 " + ",".join(f"{k}:{v:.0%}" for k, v in sorted(asset_caps.items()))
     return out.reset_index(drop=True)
@@ -682,7 +855,10 @@ def backtest_rotation(
         start_cut = closes.index.max() - pd.Timedelta(days=int(years * 365.25))
         closes = closes[closes.index >= start_cut]
     dates = list(closes.index)
-    min_history_days = int(etf_cfg.get("rotation", {}).get("min_history_days", etf_cfg.get("min_history_days", 180)))
+    rot_cfg = etf_cfg.get("rotation", {})
+    rel_cfg = rot_cfg.get("relative_momentum", {}) if str(rot_cfg.get("model", "balanced")) == "relative_momentum" else {}
+    cooldown_days = int(rel_cfg.get("cooldown_days", 0) or 0)
+    min_history_days = int(rot_cfg.get("min_history_days", etf_cfg.get("min_history_days", 180)))
     if len(dates) <= min_history_days + 2:
         return pd.DataFrame(), pd.DataFrame(), {"error": "可回测日期不足"}
 
@@ -696,19 +872,38 @@ def backtest_rotation(
     equity_rows = [{"date": dates[min_history_days], "equity": equity, "cash_weight": 1.0}]
     rebalance_rows: List[Dict[str, Any]] = []
     total_turnover = 0.0
+    cooldown_until: Dict[str, pd.Timestamp] = {}
 
     for i in range(min_history_days, len(dates) - 1):
         date = dates[i]
         if date in rebalance_set:
+            cooldown_until = {
+                code: until for code, until in cooldown_until.items()
+                if pd.Timestamp(until).normalize() >= pd.Timestamp(date).normalize()
+            }
             candidates = compute_rotation_candidates(pool, hist_map, cfg, as_of=date)
             regime = market_regime_from_candidates(candidates, cfg)
-            positions = select_rotation_positions(candidates, hist_map, cfg, account=equity, regime=regime, as_of=date)
+            positions = select_rotation_positions(
+                candidates,
+                hist_map,
+                cfg,
+                account=equity,
+                regime=regime,
+                as_of=date,
+                current_weights=weights,
+                cooldown_until=cooldown_until,
+            )
             new_weights = {normalize_code(r["code"]): float(r["target_weight"]) for _, r in positions.iterrows()} if not positions.empty else {}
             codes = set(weights) | set(new_weights)
             turnover = sum(abs(new_weights.get(c, 0.0) - weights.get(c, 0.0)) for c in codes)
             if turnover > 0:
                 equity *= max(0.0, 1.0 - turnover * cost_rate)
                 total_turnover += turnover
+            if cooldown_days > 0:
+                expiry_idx = min(i + cooldown_days, len(dates) - 1)
+                expiry = pd.Timestamp(dates[expiry_idx]).normalize()
+                for code in set(weights) - set(new_weights):
+                    cooldown_until[code] = expiry
             weights = new_weights
             for _, r in positions.iterrows():
                 rebalance_rows.append({
@@ -819,7 +1014,24 @@ def run_rotation(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, 
     validate_history_coverage(pool, hist_map, cfg, "ETF轮动配置")
     candidates = compute_rotation_candidates(pool, hist_map, cfg)
     regime = market_regime_from_candidates(candidates, cfg)
-    positions = select_rotation_positions(candidates, hist_map, cfg, account=float(args.account), regime=regime)
+    state_path = _rotation_state_path(out_dir, cfg)
+    state = _read_rotation_state(state_path)
+    as_of = _latest_candidate_date(candidates)
+    rot_cfg = cfg.get("etf", {}).get("rotation", {})
+    rel_cfg = rot_cfg.get("relative_momentum", {}) if str(rot_cfg.get("model", "balanced")) == "relative_momentum" else {}
+    cooldown_map = _state_cooldown_until(state) if int(rel_cfg.get("cooldown_days", 0) or 0) > 0 else {}
+    positions = select_rotation_positions(
+        candidates,
+        hist_map,
+        cfg,
+        account=float(args.account),
+        regime=regime,
+        as_of=as_of,
+        current_weights=_state_current_weights(state),
+        cooldown_until=cooldown_map,
+    )
+    if str(rot_cfg.get("model", "balanced")) == "relative_momentum":
+        _write_rotation_state(state_path, state, positions, rel_cfg, as_of)
     msg_path = write_rotation_outputs(out_dir, positions, candidates, regime, errors)
     return positions, candidates, msg_path
 

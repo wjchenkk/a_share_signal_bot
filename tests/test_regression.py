@@ -673,6 +673,92 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(float(positions["target_weight"].sum()), 0.90, places=6)
         self.assertTrue((positions["target_weight"].round(6) == 0.30).all())
 
+    def test_etf_relative_momentum_keeps_incumbent_with_turnover_penalty(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "relative_momentum"
+        cfg["etf"]["rotation"]["max_positions"] = 2
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        cfg["etf"]["rotation"]["relative_momentum"]["max_per_asset_class"] = 3
+        cfg["etf"]["rotation"]["relative_momentum"]["turnover_penalty"]["enabled"] = True
+        cfg["etf"]["rotation"]["relative_momentum"]["turnover_penalty"]["min_score_advantage"] = 0.03
+        candidates = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "momentum_signal": 0.300, "rotation_score": 95.0, "atr_pct": 0.020, "close": 4.0},
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "momentum_signal": 0.280, "rotation_score": 90.0, "atr_pct": 0.030, "close": 1.2},
+                {"code": "159915", "name": "创业板ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "momentum_signal": 0.275, "rotation_score": 85.0, "atr_pct": 0.025, "close": 2.0},
+            ]
+        )
+        hist_map = {
+            "510300": deterministic_hist(3.0, 4.0, periods=260),
+            "512880": deterministic_hist(1.0, 1.8, periods=260),
+            "159915": deterministic_hist(1.0, 1.7, periods=260),
+        }
+        positions = etf_rotation.select_rotation_positions(
+            candidates,
+            hist_map,
+            cfg,
+            account=100000.0,
+            regime={"regime": "relative_momentum", "target_exposure": 1.0, "summary": "测试相对动量"},
+            current_weights={"159915": 0.25},
+        )
+        codes = positions["code"].astype(str).tolist()
+        self.assertIn("159915", codes)
+        self.assertNotIn("512880", codes)
+
+    def test_etf_relative_momentum_blocks_cooldown_reentry(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "relative_momentum"
+        cfg["etf"]["rotation"]["max_positions"] = 1
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        cfg["etf"]["rotation"]["relative_momentum"]["cooldown_days"] = 10
+        candidates = pd.DataFrame(
+            [
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "momentum_signal": 0.30, "rotation_score": 95.0, "atr_pct": 0.030, "close": 1.2},
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "momentum_signal": 0.25, "rotation_score": 90.0, "atr_pct": 0.020, "close": 4.0},
+            ]
+        )
+        hist_map = {
+            "512880": deterministic_hist(1.0, 1.8, periods=260),
+            "510300": deterministic_hist(3.0, 4.0, periods=260),
+        }
+        positions = etf_rotation.select_rotation_positions(
+            candidates,
+            hist_map,
+            cfg,
+            account=100000.0,
+            regime={"regime": "relative_momentum", "target_exposure": 1.0, "summary": "测试相对动量"},
+            as_of=pd.Timestamp("2025-05-01"),
+            cooldown_until={"512880": pd.Timestamp("2025-05-10")},
+        )
+        self.assertEqual(positions.iloc[0]["code"], "510300")
+
+    def test_etf_relative_momentum_ignores_cooldown_when_disabled(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "relative_momentum"
+        cfg["etf"]["rotation"]["max_positions"] = 1
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        cfg["etf"]["rotation"]["relative_momentum"]["cooldown_days"] = 0
+        candidates = pd.DataFrame(
+            [
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "momentum_signal": 0.30, "rotation_score": 95.0, "atr_pct": 0.030, "close": 1.2},
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "momentum_signal": 0.25, "rotation_score": 90.0, "atr_pct": 0.020, "close": 4.0},
+            ]
+        )
+        hist_map = {
+            "512880": deterministic_hist(1.0, 1.8, periods=260),
+            "510300": deterministic_hist(3.0, 4.0, periods=260),
+        }
+        positions = etf_rotation.select_rotation_positions(
+            candidates,
+            hist_map,
+            cfg,
+            account=100000.0,
+            regime={"regime": "relative_momentum", "target_exposure": 1.0, "summary": "测试相对动量"},
+            as_of=pd.Timestamp("2025-05-01"),
+            cooldown_until={"512880": pd.Timestamp("2025-05-10")},
+        )
+        self.assertEqual(positions.iloc[0]["code"], "512880")
+
     def test_etf_rotation_rejects_low_history_coverage(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
         cfg["etf"]["max_error_rate_for_valid_run"] = 0.20

@@ -251,7 +251,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "allow_defensive": False,
                 "target_exposure": 1.0,
                 "max_per_asset_class": 2,
-                "allocation": "equal_weight"
+                "allocation": "equal_weight",
+                "cooldown_days": 0,
+                "turnover_penalty": {
+                    "enabled": True,
+                    "min_score_advantage": 0.03
+                }
             },
             "core_broad_regimes": ["strong", "neutral"],
             "core_broad_min_score": 55.0,
