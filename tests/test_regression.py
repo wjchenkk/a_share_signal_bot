@@ -179,6 +179,16 @@ class DeterministicEtfPoolFetcher:
         return etf_pool.normalize_etf_spot(raw, "deterministic"), []
 
 
+class FailingEtfPoolFetcher:
+    def __init__(self, cfg, cache_dir: str = "", refresh: bool = False):
+        self.cfg = cfg
+        self.cache_dir = cache_dir
+        self.refresh = refresh
+
+    def fetch_all(self, sources):
+        return pd.DataFrame(), [{"source": "eastmoney", "error": "NameResolutionError"}]
+
+
 def comparable_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "code" in out.columns:
@@ -445,6 +455,38 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertTrue((root / "etf_out" / "latest_etf_pool_selected.csv").exists())
             self.assertTrue(report_path.exists())
             self.assertFalse((root / "etf_out" / "latest_signals.csv").exists())
+
+    def test_build_etf_pool_does_not_overwrite_on_source_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool_path = root / "etf_pool.csv"
+            original = "code,name,category\n510300,沪深300ETF,宽基\n"
+            pool_path.write_text(original, encoding="utf-8-sig")
+            args = type(
+                "Args",
+                (),
+                {
+                    "config": "",
+                    "out": str(root / "etf_out"),
+                    "pool_out": str(pool_path),
+                    "cache_dir": str(root / "cache" / "etf_pool"),
+                    "sources": "eastmoney",
+                    "max_size": None,
+                    "min_amount": None,
+                    "refresh": True,
+                },
+            )()
+            old_fetcher = etf_pool.EtfPoolFetcher
+            try:
+                etf_pool.EtfPoolFetcher = FailingEtfPoolFetcher
+                with self.assertRaisesRegex(RuntimeError, "未获取到ETF列表"):
+                    with redirect_stdout(io.StringIO()):
+                        etf_pool.build_etf_pool(args)
+            finally:
+                etf_pool.EtfPoolFetcher = old_fetcher
+            self.assertEqual(pool_path.read_text(encoding="utf-8-sig"), original)
+            self.assertTrue((root / "etf_out" / "latest_etf_pool_report.md").exists())
+            self.assertTrue((root / "etf_out" / "latest_etf_pool_errors.csv").exists())
 
     def test_etf_rotation_selects_with_category_caps(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)

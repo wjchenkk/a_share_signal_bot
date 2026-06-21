@@ -316,9 +316,6 @@ def build_etf_pool(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame
     raw, errors = fetcher.fetch_all(sources)
     candidates = enrich_etf_pool_candidates(raw, cfg)
     pool = select_etf_pool(candidates, cfg, max_size=args.max_size)
-    pool_path = Path(args.pool_out or cfg.get("etf", {}).get("pool", "etf_pool.csv"))
-    pool_path.parent.mkdir(parents=True, exist_ok=True)
-    pool[["code", "name", "category"]].to_csv(pool_path, index=False, encoding="utf-8-sig")
 
     run_date = now_cn().strftime("%Y%m%d_%H%M%S")
     candidates.to_csv(out_dir / f"etf_pool_candidates_{run_date}.csv", index=False, encoding="utf-8-sig")
@@ -331,6 +328,16 @@ def build_etf_pool(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame
     report_path = out_dir / "latest_etf_pool_report.md"
     report_path.write_text(report, encoding="utf-8")
     (out_dir / "latest_etf_pool_message.txt").write_text("\n".join(report.splitlines()[:40]), encoding="utf-8")
+
+    if raw is None or raw.empty:
+        detail = "；".join(f"{e.get('source')}: {e.get('error')}" for e in errors) or "无候选数据"
+        raise RuntimeError(f"ETF池构建失败：未获取到ETF列表，不覆盖本地ETF池。{detail}")
+    if pool.empty:
+        raise RuntimeError("ETF池构建失败：没有符合条件的ETF，不覆盖本地ETF池；请查看 latest_etf_pool_candidates.csv")
+
+    pool_path = Path(args.pool_out or cfg.get("etf", {}).get("pool", "etf_pool.csv"))
+    pool_path.parent.mkdir(parents=True, exist_ok=True)
+    pool[["code", "name", "category"]].to_csv(pool_path, index=False, encoding="utf-8-sig")
     print(f"[ETF池] 已生成 {pool_path}，入池 {len(pool)} 只")
     print(f"[ETF池] {report_path}")
     return pool, candidates, report_path
