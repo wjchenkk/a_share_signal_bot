@@ -15,6 +15,7 @@ import pandas as pd
 import main as bot
 from a_share_signal_bot.market_data import AkshareFetcher
 from a_share_signal_bot import hot_pool
+from a_share_signal_bot import base as bot_base
 from a_share_signal_bot import etf_strategy
 from a_share_signal_bot import etf_rotation
 from a_share_signal_bot import etf_pool
@@ -215,6 +216,16 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(merged["data"]["cache_hours"], 1)
         self.assertEqual(merged["data"]["providers"], ["a"])
         self.assertEqual(base["data"]["cache_hours"], 24)
+
+    def test_write_or_clear_error_csv_removes_stale_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "latest_errors.csv"
+            path.write_text("stale", encoding="utf-8")
+            bot_base.write_or_clear_error_csv(path, [])
+            self.assertFalse(path.exists())
+            bot_base.write_or_clear_error_csv(path, [{"code": "510300", "error": "failed"}])
+            self.assertTrue(path.exists())
+            self.assertIn("510300", path.read_text(encoding="utf-8-sig"))
 
     def test_stock_pool_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -596,6 +607,20 @@ class OfflineRegressionTests(unittest.TestCase):
         defensive_weight = float(positions.loc[positions["asset_class"].eq("defensive"), "target_weight"].sum())
         self.assertLessEqual(broad_weight, 0.2500001)
         self.assertGreaterEqual(defensive_weight, 0.20)
+
+    def test_etf_rotation_rejects_low_history_coverage(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["max_error_rate_for_valid_run"] = 0.20
+        pool = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基"},
+                {"code": "512880", "name": "证券ETF", "category": "行业"},
+                {"code": "511010", "name": "国债ETF", "category": "债券"},
+            ]
+        )
+        hist_map = {"510300": deterministic_hist(3.0, 5.0, periods=260)}
+        with self.assertRaisesRegex(RuntimeError, "成功 1/3"):
+            etf_rotation.validate_history_coverage(pool, hist_map, cfg, "ETF轮动回测")
 
     def test_etf_rotation_backtest_outputs_summary(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)

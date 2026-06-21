@@ -326,8 +326,7 @@ def build_etf_pool(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame
     candidates.to_csv(out_dir / "latest_etf_pool_candidates.csv", index=False, encoding="utf-8-sig")
     pool.to_csv(out_dir / f"etf_pool_selected_{run_date}.csv", index=False, encoding="utf-8-sig")
     pool.to_csv(out_dir / "latest_etf_pool_selected.csv", index=False, encoding="utf-8-sig")
-    if errors:
-        pd.DataFrame(errors).to_csv(out_dir / "latest_etf_pool_errors.csv", index=False, encoding="utf-8-sig")
+    write_or_clear_error_csv(out_dir / "latest_etf_pool_errors.csv", errors)
     report = format_pool_report(pool, candidates, errors, cfg)
     report_path = out_dir / "latest_etf_pool_report.md"
     report_path.write_text(report, encoding="utf-8")

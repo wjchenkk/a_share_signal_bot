@@ -711,7 +711,7 @@ def scan_etf(
     allocated.to_csv(out_path / "latest_etf_signals_raw.csv", index=False, encoding="utf-8-sig")
     if errors:
         pd.DataFrame(errors).to_csv(errors_path, index=False, encoding="utf-8-sig")
-        pd.DataFrame(errors).to_csv(out_path / "latest_etf_errors.csv", index=False, encoding="utf-8-sig")
+    write_or_clear_error_csv(out_path / "latest_etf_errors.csv", errors)
 
     report = format_etf_report(candidates, allocated, account)
     report_path.write_text(report, encoding="utf-8")

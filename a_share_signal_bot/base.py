@@ -201,6 +201,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allow_stale_cache_on_error": True,
         "use_stale_cache_on_network_error": True,
         "fail_fast_network_errors": True,
+        "max_error_rate_for_valid_run": 0.20,
         "min_history_days": 180,
         "min_amount_ma20": 20_000_000,
         "score_threshold": 70.0,
@@ -401,6 +402,15 @@ def load_config(path: Optional[str]) -> Dict[str, Any]:
             raise RuntimeError("读取 YAML 配置需要安装 PyYAML：pip install pyyaml") from exc
         user_cfg = yaml.safe_load(text) or {}
     return deep_merge(cfg, user_cfg)
+
+
+def write_or_clear_error_csv(path: str | Path, errors: List[Dict[str, Any]]) -> None:
+    p = Path(path)
+    if errors:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(errors).to_csv(p, index=False, encoding="utf-8-sig")
+    elif p.exists():
+        p.unlink()
 
 
 def normalize_code(value: Any) -> str:

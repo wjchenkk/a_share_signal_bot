@@ -458,6 +458,26 @@ def fetch_rotation_histories(pool: pd.DataFrame, cfg: Dict[str, Any], refresh: b
     return hist_map, errors
 
 
+def validate_history_coverage(pool: pd.DataFrame, hist_map: Dict[str, pd.DataFrame], cfg: Dict[str, Any], context: str) -> Tuple[int, int]:
+    total = 0 if pool is None else len(pool)
+    if total <= 0:
+        raise RuntimeError(f"{context}失败：ETF池为空")
+    success = 0
+    for _, row in pool.iterrows():
+        try:
+            code = normalize_code(row.get("code", ""))
+        except Exception:
+            continue
+        hist = hist_map.get(code)
+        if hist is not None and not hist.empty:
+            success += 1
+    max_error_rate = float(cfg.get("etf", {}).get("max_error_rate_for_valid_run", 0.20))
+    min_success = int(math.ceil(total * max(0.0, 1.0 - max_error_rate)))
+    if success < min_success:
+        raise RuntimeError(f"{context}失败：ETF历史数据成功率过低，成功 {success}/{total}，要求至少 {min_success}/{total}；不生成结果")
+    return success, total
+
+
 def to_rotation_chinese(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {
         "date": "日期",
@@ -679,8 +699,7 @@ def write_rotation_outputs(out_dir: Path, positions: pd.DataFrame, candidates: p
     to_rotation_chinese(candidates).to_csv(out_dir / "latest_etf_rotation_candidates.csv", index=False, encoding="utf-8-sig")
     positions.to_csv(out_dir / "latest_etf_rotation_positions_raw.csv", index=False, encoding="utf-8-sig")
     candidates.to_csv(out_dir / "latest_etf_rotation_candidates_raw.csv", index=False, encoding="utf-8-sig")
-    if errors:
-        pd.DataFrame(errors).to_csv(out_dir / "latest_etf_rotation_errors.csv", index=False, encoding="utf-8-sig")
+    write_or_clear_error_csv(out_dir / "latest_etf_rotation_errors.csv", errors)
     msg = format_rotation_message(positions, candidates, regime)
     report = "# ETF轮动配置报告\n\n" + msg + "\n"
     (out_dir / f"etf_rotation_report_{run_date}.md").write_text(report, encoding="utf-8")
@@ -699,6 +718,8 @@ def run_rotation(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, 
     hist_map, errors = fetch_rotation_histories(pool, cfg, refresh=bool(args.refresh), limit=int(args.limit or 0))
     if args.limit and args.limit > 0:
         pool = pool.head(int(args.limit)).copy()
+    write_or_clear_error_csv(out_dir / "latest_etf_rotation_errors.csv", errors)
+    validate_history_coverage(pool, hist_map, cfg, "ETF轮动配置")
     candidates = compute_rotation_candidates(pool, hist_map, cfg)
     regime = market_regime_from_candidates(candidates, cfg)
     positions = select_rotation_positions(candidates, hist_map, cfg, account=float(args.account), regime=regime)
@@ -740,10 +761,10 @@ def run_backtest(args: argparse.Namespace) -> Tuple[pd.DataFrame, pd.DataFrame, 
     out_dir = ensure_dir(args.out or etf_cfg.get("out_dir", "etf_output"))
     pool = read_etf_pool(pool_path)
     hist_map, errors = fetch_rotation_histories(pool, cfg, refresh=bool(args.refresh), limit=int(args.limit or 0))
-    if errors:
-        pd.DataFrame(errors).to_csv(out_dir / "latest_etf_rotation_backtest_errors.csv", index=False, encoding="utf-8-sig")
     if args.limit and args.limit > 0:
         pool = pool.head(int(args.limit)).copy()
+    write_or_clear_error_csv(out_dir / "latest_etf_rotation_backtest_errors.csv", errors)
+    validate_history_coverage(pool, hist_map, cfg, "ETF轮动回测")
     equity, rebalances, summary = backtest_rotation(
         pool,
         hist_map,
