@@ -17,10 +17,32 @@ msg="$(cat "$tmp")"
 ensure_etf_pool() {
   if [ ! -f "$ETF_POOL" ]; then
     echo "ETF池文件不存在：$ETF_POOL"
-    echo "可先执行：cp etf_pool_sample.csv etf_pool.csv，或设置 ETF_POOL=/path/to/etf_pool.csv"
+    echo "可先执行：python etf_pool.py --config config.example.yml --pool-out \"$ETF_POOL\" --out etf_output"
+    echo "也可以复制样例：cp etf_pool_sample.csv etf_pool.csv，或设置 ETF_POOL=/path/to/etf_pool.csv"
     exit 1
   fi
 }
+
+# ETF 建池：只生成 etf_pool.csv 和 etf_output/latest_etf_pool_*，不读写个股池。
+if printf '%s' "$msg" | grep -Eq 'ETF.*(建池|构建.*池|生成.*池|更新.*池)|etf.*(建池|构建.*池|生成.*池|更新.*池)'; then
+  cmd=(python etf_pool.py --config config.example.yml --pool-out "$ETF_POOL" --out etf_output)
+  if [ -n "${ETF_POOL_MAX_SIZE:-}" ]; then
+    cmd+=(--max-size "$ETF_POOL_MAX_SIZE")
+  fi
+  if [ -n "${ETF_POOL_MIN_AMOUNT:-}" ]; then
+    cmd+=(--min-amount "$ETF_POOL_MIN_AMOUNT")
+  fi
+  if [ "${REFRESH:-0}" = "1" ]; then
+    cmd+=(--refresh)
+  fi
+  if ! "${cmd[@]}" > etf_output/last_etf_pool_chat_run.log 2>&1; then
+    echo "ETF建池执行失败："
+    tail -120 etf_output/last_etf_pool_chat_run.log || true
+    exit 1
+  fi
+  cat etf_output/latest_etf_pool_message.txt
+  exit 0
+fi
 
 # ETF 轮动回测必须优先于普通个股回测，否则“ETF回测”会被普通回测规则截获。
 if printf '%s' "$msg" | grep -Eq 'ETF.*(回测|模拟|backtest|Backtest)|etf.*(回测|模拟|backtest)'; then

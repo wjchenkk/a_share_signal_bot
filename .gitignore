@@ -18,6 +18,8 @@ portfolio.csv
 trade_state.csv
 stock_pool.csv
 stock_pool.csv.bak.*
+etf_pool.csv
+etf_pool.csv.bak.*
 sector_map.csv
 
 # Market data caches and generated output

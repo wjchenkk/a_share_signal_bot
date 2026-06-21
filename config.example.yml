@@ -122,6 +122,21 @@ etf:
   pool: "etf_pool.csv"
   out_dir: "etf_output"
   cache_dir: "cache/etf"
+  pool_builder:
+    sources: ["eastmoney", "ths"]
+    cache_dir: "cache/etf_pool"
+    cache_hours: 24
+    max_size: 40
+    min_amount: 30000000
+    min_price: 0.20
+    max_per_theme: 2
+    asset_class_quotas:
+      broad: 10
+      sector: 16
+      cross_border: 6
+      defensive: 5
+      commodity: 3
+    exclude_keywords: ["货币", "现金", "保证金", "快线", "添益", "银华日利"]
   start_date: "20200101"
   end_date: ""
   adjust: ""

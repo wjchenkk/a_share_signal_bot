@@ -17,6 +17,7 @@ from a_share_signal_bot.market_data import AkshareFetcher
 from a_share_signal_bot import hot_pool
 from a_share_signal_bot import etf_strategy
 from a_share_signal_bot import etf_rotation
+from a_share_signal_bot import etf_pool
 import a_share_signal_bot.scanner as scanner
 
 
@@ -156,6 +157,26 @@ class FailingEtfFetcher:
 
     def etf_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
         raise RuntimeError("NameResolutionError: Failed to resolve ETF source")
+
+
+class DeterministicEtfPoolFetcher:
+    def __init__(self, cfg, cache_dir: str = "", refresh: bool = False):
+        self.cfg = cfg
+        self.cache_dir = cache_dir
+        self.refresh = refresh
+
+    def fetch_all(self, sources):
+        raw = pd.DataFrame(
+            [
+                {"代码": "510300", "名称": "沪深300ETF", "最新价": 4.2, "成交额": "10亿", "涨跌幅": 1.2},
+                {"代码": "510310", "名称": "沪深300增强ETF", "最新价": 3.9, "成交额": "9亿", "涨跌幅": 1.0},
+                {"代码": "512880", "名称": "证券ETF", "最新价": 1.1, "成交额": "8亿", "涨跌幅": 0.8},
+                {"代码": "511010", "名称": "国债ETF", "最新价": 1.1, "成交额": "7亿", "涨跌幅": 0.1},
+                {"代码": "513100", "名称": "纳指ETF", "最新价": 1.5, "成交额": "6亿", "涨跌幅": 0.5},
+                {"代码": "511990", "名称": "货币ETF", "最新价": 100.0, "成交额": "20亿", "涨跌幅": 0.0},
+            ]
+        )
+        return etf_pool.normalize_etf_spot(raw, "deterministic"), []
 
 
 def comparable_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -351,6 +372,79 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertEqual(float(candidates.iloc[0]["score"]), 0.0)
             self.assertIn("数据错误", str(candidates.iloc[0]["filter_reason"]))
             self.assertTrue((out_dir / "latest_etf_errors.csv").exists())
+
+    def test_etf_pool_builder_selects_liquid_diversified_pool(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["pool_builder"]["min_amount"] = 1
+        cfg["etf"]["pool_builder"]["min_price"] = 0.0
+        cfg["etf"]["pool_builder"]["max_size"] = 4
+        cfg["etf"]["pool_builder"]["max_per_theme"] = 1
+        cfg["etf"]["pool_builder"]["asset_class_quotas"] = {
+            "broad": 2,
+            "sector": 2,
+            "cross_border": 1,
+            "defensive": 1,
+            "commodity": 1,
+        }
+        raw, _ = DeterministicEtfPoolFetcher(cfg).fetch_all(["deterministic"])
+        candidates = etf_pool.enrich_etf_pool_candidates(raw, cfg)
+        selected = etf_pool.select_etf_pool(candidates, cfg)
+        codes = selected["code"].astype(str).tolist()
+        self.assertIn("510300", codes)
+        self.assertIn("512880", codes)
+        self.assertIn("511010", codes)
+        self.assertIn("513100", codes)
+        self.assertNotIn("510310", codes)
+        self.assertFalse(candidates.loc[candidates["code"].eq("511990"), "eligible"].iloc[0])
+        self.assertTrue(selected["category"].astype(str).str.contains("/").all())
+
+    def test_build_etf_pool_writes_independent_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg_path = root / "config.yml"
+            cfg_path.write_text(
+                "etf:\n"
+                "  pool_builder:\n"
+                "    min_amount: 1\n"
+                "    min_price: 0.0\n"
+                "    max_size: 3\n"
+                "    max_per_theme: 1\n"
+                "    asset_class_quotas:\n"
+                "      broad: 1\n"
+                "      sector: 1\n"
+                "      defensive: 1\n"
+                "      cross_border: 1\n"
+                "      commodity: 1\n",
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "config": str(cfg_path),
+                    "out": str(root / "etf_out"),
+                    "pool_out": str(root / "etf_pool.csv"),
+                    "cache_dir": str(root / "cache" / "etf_pool"),
+                    "sources": "deterministic",
+                    "max_size": None,
+                    "min_amount": None,
+                    "refresh": False,
+                },
+            )()
+            old_fetcher = etf_pool.EtfPoolFetcher
+            try:
+                etf_pool.EtfPoolFetcher = DeterministicEtfPoolFetcher
+                with redirect_stdout(io.StringIO()):
+                    pool, candidates, report_path = etf_pool.build_etf_pool(args)
+            finally:
+                etf_pool.EtfPoolFetcher = old_fetcher
+            self.assertFalse(pool.empty)
+            self.assertGreater(len(candidates), len(pool))
+            self.assertTrue((root / "etf_pool.csv").exists())
+            self.assertTrue((root / "etf_out" / "latest_etf_pool_candidates.csv").exists())
+            self.assertTrue((root / "etf_out" / "latest_etf_pool_selected.csv").exists())
+            self.assertTrue(report_path.exists())
+            self.assertFalse((root / "etf_out" / "latest_signals.csv").exists())
 
     def test_etf_rotation_selects_with_category_caps(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
@@ -571,11 +665,14 @@ class OfflineRegressionTests(unittest.TestCase):
 
     def test_stockbot_chat_routes_etf_before_stock_backtest(self) -> None:
         script = (ROOT / "stockbot_chat.sh").read_text(encoding="utf-8")
+        self.assertIn("etf_pool.py", script)
         self.assertIn("etf_strategy.py", script)
         self.assertIn("etf_rotation.py", script)
         self.assertIn("ETF_POOL", script)
+        etf_pool_pos = script.index("last_etf_pool_chat_run.log")
         etf_backtest_pos = script.index("last_etf_rotation_backtest_chat_run.log")
         stock_backtest_pos = script.index("python backtest.py")
+        self.assertLess(etf_pool_pos, etf_backtest_pos)
         self.assertLess(etf_backtest_pos, stock_backtest_pos)
 
     def test_run_etf_daily_runs_signal_and_rotation(self) -> None:
