@@ -22,6 +22,7 @@ from a_share_signal_bot import hot_pool
 from a_share_signal_bot import base as bot_base
 from a_share_signal_bot import etf_strategy
 from a_share_signal_bot import etf_rotation
+from a_share_signal_bot import etf_trade_manager
 from a_share_signal_bot import etf_pool
 from a_share_signal_bot import fund_dca
 from a_share_signal_bot import space_cleanup
@@ -775,6 +776,62 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertIn("510300", candidates["code"].astype(str).tolist())
             self.assertGreaterEqual(len(allocated), 1)
             self.assertTrue(allocated["code"].astype(str).str.contains("510300").any())
+
+    def test_etf_trade_manager_waits_until_rebalance_day(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        portfolio = pd.DataFrame([{"code": "510300", "name": "沪深300ETF", "shares": 2000, "cost_price": 4.0}])
+        targets = pd.DataFrame([
+            {"code": "510300", "name": "沪深300ETF", "target_weight": 0.25, "price_ref": 5.0},
+            {"code": "512880", "name": "证券ETF", "target_weight": 0.25, "price_ref": 1.0},
+        ])
+        actions, summary = etf_trade_manager.build_rebalance_actions(
+            portfolio,
+            targets,
+            {},
+            cfg,
+            account=100000.0,
+            cash=50000.0,
+            as_of=pd.Timestamp("2026-06-18"),
+            rebalance_rule="W-FRI",
+        )
+        self.assertFalse(summary["rebalance_due"])
+        self.assertTrue(actions["action"].astype(str).eq("WAIT_REBALANCE").all())
+        self.assertEqual(int(actions["trade_shares"].sum()), 0)
+        msg = etf_trade_manager.format_trade_message(actions, summary)
+        self.assertIn("不是 ETF 再平衡日", msg)
+
+    def test_etf_trade_manager_generates_rebalance_deltas(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["trade"]["rebalance_threshold_pct"] = 0.01
+        cfg["etf"]["trade"]["min_trade_cash"] = 0
+        portfolio = pd.DataFrame([
+            {"code": "510300", "name": "沪深300ETF", "shares": 2000, "cost_price": 4.0},
+            {"code": "159915", "name": "创业板ETF", "shares": 1000, "cost_price": 4.0},
+        ])
+        targets = pd.DataFrame([
+            {"code": "510300", "name": "沪深300ETF", "target_weight": 0.25, "price_ref": 5.0},
+            {"code": "512880", "name": "证券ETF", "target_weight": 0.25, "price_ref": 1.0},
+        ])
+        actions, summary = etf_trade_manager.build_rebalance_actions(
+            portfolio,
+            targets,
+            {"159915": {"price": 4.0, "name": "创业板ETF"}},
+            cfg,
+            account=100000.0,
+            cash=50000.0,
+            as_of=pd.Timestamp("2026-06-19"),
+            rebalance_rule="W-FRI",
+        )
+        self.assertTrue(summary["rebalance_due"])
+        by_code = actions.set_index("code")
+        self.assertEqual(by_code.loc["510300", "action"], "BUY")
+        self.assertEqual(int(by_code.loc["510300", "trade_shares"]), 3000)
+        self.assertEqual(by_code.loc["512880", "action"], "BUY")
+        self.assertEqual(int(by_code.loc["512880", "trade_shares"]), 25000)
+        self.assertEqual(by_code.loc["159915", "action"], "SELL")
+        self.assertEqual(int(by_code.loc["159915", "trade_shares"]), 1000)
+        msg = etf_trade_manager.format_trade_message(actions, summary)
+        self.assertIn("需要执行/准备的 ETF 操作", msg)
 
     def test_etf_scan_handles_all_data_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:

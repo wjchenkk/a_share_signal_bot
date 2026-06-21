@@ -306,6 +306,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "slippage_bps": 5,
             "benchmark_code": "510300"
         },
+        "trade": {
+            "portfolio": "etf_portfolio.csv",
+            "out_dir": "etf_output",
+            "target_positions": "etf_output/latest_etf_rotation_positions_raw.csv",
+            "target_candidates": "etf_output/latest_etf_rotation_candidates_raw.csv",
+            "rebalance": "",
+            "rebalance_threshold_pct": 0.03,
+            "min_trade_cash": 1000.0,
+        },
     },
     "fund_dca": {
         "out_dir": "fund_output",

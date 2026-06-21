@@ -8,6 +8,7 @@ ETF_POOL="${ETF_POOL:-etf_pool.csv}"
 ETF_OUT="${ETF_OUT:-etf_output}"
 CONFIG="${CONFIG:-config.example.yml}"
 REFRESH="${REFRESH:-0}"
+ETF_PORTFOLIO="${ETF_PORTFOLIO:-etf_portfolio.csv}"
 
 mkdir -p "$ETF_OUT"
 
@@ -48,4 +49,32 @@ fi
   "${refresh_args[@]}" \
   > "$ETF_OUT/last_etf_rotation_daily_run.log" 2>&1
 
-cat "$ETF_OUT/latest_etf_rotation_message.txt"
+trade_args=(
+  etf_trade_manager.py
+  --portfolio "$ETF_PORTFOLIO"
+  --targets "$ETF_OUT/latest_etf_rotation_positions_raw.csv"
+  --candidates "$ETF_OUT/latest_etf_rotation_candidates_raw.csv"
+  --config "$CONFIG"
+  --out "$ETF_OUT"
+  --account "$ACCOUNT"
+)
+if [ -n "${ETF_REBALANCE:-}" ]; then
+  trade_args+=(--rebalance "$ETF_REBALANCE")
+fi
+if [ "${ETF_FORCE_REBALANCE:-0}" = "1" ]; then
+  trade_args+=(--force-rebalance)
+fi
+
+"$py" "${trade_args[@]}" \
+  > "$ETF_OUT/last_etf_trade_daily_run.log" 2>&1
+
+{
+  echo "==== ETF买点信号 ===="
+  cat "$ETF_OUT/latest_etf_message.txt"
+  echo
+  echo "==== ETF轮动目标 ===="
+  cat "$ETF_OUT/latest_etf_rotation_message.txt"
+  echo
+  echo "==== ETF持仓/调仓计划 ===="
+  cat "$ETF_OUT/latest_etf_trade_plan.txt"
+}

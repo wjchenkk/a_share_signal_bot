@@ -32,6 +32,7 @@ pip install -r requirements.txt
 cp -n stock_pool_sample.csv stock_pool.csv
 cp -n portfolio_sample.csv portfolio.csv
 cp -n etf_pool_sample.csv etf_pool.csv
+cp -n etf_portfolio_sample.csv etf_portfolio.csv
 ```
 
 国内网络可用：
@@ -56,6 +57,7 @@ sector_map.csv        可选，手工板块映射
 portfolio.csv         当前持仓
 trade_state.csv       买入后交易计划状态
 etf_pool.csv          ETF池
+etf_portfolio.csv     ETF当前持仓
 config.yml            可选，本地私有配置
 ```
 
@@ -202,6 +204,20 @@ python etf_strategy.py --pool etf_pool.csv --config config.example.yml --out etf
 python etf_rotation.py --mode rotate --pool etf_pool.csv --config config.example.yml --out etf_output --account 100000
 ```
 
+生成 ETF 持仓/调仓计划：
+
+```bash
+python etf_trade_manager.py \
+  --portfolio etf_portfolio.csv \
+  --targets etf_output/latest_etf_rotation_positions_raw.csv \
+  --candidates etf_output/latest_etf_rotation_candidates_raw.csv \
+  --config config.example.yml \
+  --out etf_output \
+  --account 200000
+```
+
+ETF 调仓管理默认沿用 `etf.backtest.rebalance`，也就是和回测一致的再平衡频率。默认 `W-FRI` 时，每天运行也只会在周五输出买卖差额，其他日期只推送目标组合和持仓偏离。
+
 回测 ETF 轮动：
 
 ```bash
@@ -211,8 +227,8 @@ python etf_rotation.py --mode backtest --pool etf_pool.csv --config config.examp
 日常 ETF 运行：
 
 ```bash
-ACCOUNT=200000 ETF_POOL=etf_pool.csv ./run_etf_daily.sh
-REFRESH=1 ACCOUNT=200000 ETF_POOL=etf_pool.csv ./run_etf_daily.sh
+ACCOUNT=200000 ETF_POOL=etf_pool.csv ETF_PORTFOLIO=etf_portfolio.csv ./run_etf_daily.sh
+REFRESH=1 ACCOUNT=200000 ETF_POOL=etf_pool.csv ETF_PORTFOLIO=etf_portfolio.csv ./run_etf_daily.sh
 ```
 
 通过对话入口：
@@ -221,6 +237,7 @@ REFRESH=1 ACCOUNT=200000 ETF_POOL=etf_pool.csv ./run_etf_daily.sh
 printf '%s\n' 'ETF建池' | ./stockbot_chat.sh
 printf '%s\n' '生成ETF信号' | ./stockbot_chat.sh
 printf '%s\n' 'ETF轮动配置' | ./stockbot_chat.sh
+printf '%s\n' 'ETF持仓调仓计划' | ETF_PORTFOLIO=etf_portfolio.csv ./stockbot_chat.sh
 printf '%s\n' 'ETF轮动回测' | ./stockbot_chat.sh
 ```
 
@@ -236,6 +253,8 @@ etf_output/latest_etf_candidates.csv              ETF买点候选评分
 etf_output/latest_etf_rotation_message.txt        ETF轮动摘要
 etf_output/latest_etf_rotation_positions.csv      ETF轮动组合
 etf_output/latest_etf_rotation_candidates.csv     ETF轮动候选
+etf_output/latest_etf_trade_plan.txt              ETF持仓/调仓摘要
+etf_output/latest_etf_trade_actions.csv           ETF调仓动作清单
 etf_output/latest_etf_rotation_backtest_report.md ETF轮动回测报告
 ```
 
