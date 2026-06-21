@@ -240,6 +240,116 @@ def _max_selected_corr(code: str, selected: List[str], returns: pd.DataFrame, lo
     return float(corr.max())
 
 
+def _asset_class_caps(rot_cfg: Dict[str, Any], regime: str) -> Dict[str, float]:
+    caps_cfg = rot_cfg.get("asset_class_caps", {})
+    if not isinstance(caps_cfg, dict):
+        return {}
+    raw = caps_cfg.get(regime, caps_cfg.get("default", {}))
+    if not isinstance(raw, dict):
+        return {}
+    caps: Dict[str, float] = {}
+    for k, v in raw.items():
+        try:
+            caps[str(k)] = max(0.0, min(1.0, float(v)))
+        except Exception:
+            continue
+    return caps
+
+
+def _distribute_with_caps(
+    rows: pd.DataFrame,
+    preferences: pd.Series,
+    target_exposure: float,
+    max_position_pct: float,
+    asset_caps: Dict[str, float],
+) -> pd.Series:
+    weights = pd.Series(0.0, index=rows.index, dtype=float)
+    prefs = pd.to_numeric(preferences, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=0.0)
+    if prefs.sum() <= 0:
+        prefs = pd.Series(1.0, index=rows.index, dtype=float)
+    target = max(0.0, min(1.0, float(target_exposure)))
+    max_pos = max(0.0, min(1.0, float(max_position_pct)))
+    remaining = target
+    active = set(rows.index.tolist())
+    eps = 1e-9
+    for _ in range(len(rows) + 4):
+        if remaining <= eps or not active:
+            break
+        capacities = {}
+        for idx in list(active):
+            asset_class = str(rows.at[idx, "asset_class"]) if "asset_class" in rows.columns else ""
+            class_cap = float(asset_caps.get(asset_class, 1.0))
+            class_used = float(weights[rows["asset_class"].astype(str).eq(asset_class)].sum()) if "asset_class" in rows.columns else 0.0
+            cap = min(max_pos - weights.at[idx], class_cap - class_used)
+            if cap <= eps:
+                active.remove(idx)
+            else:
+                capacities[idx] = cap
+        if not capacities:
+            break
+        pref_sum = float(prefs.loc[list(capacities.keys())].sum())
+        if pref_sum <= eps:
+            pref_share = pd.Series(1.0 / len(capacities), index=list(capacities.keys()))
+        else:
+            pref_share = prefs.loc[list(capacities.keys())] / pref_sum
+        added = 0.0
+        saturated = []
+        for idx, cap in capacities.items():
+            want = remaining * float(pref_share.at[idx])
+            asset_class = str(rows.at[idx, "asset_class"]) if "asset_class" in rows.columns else ""
+            class_cap = float(asset_caps.get(asset_class, 1.0))
+            class_used_now = float(weights[rows["asset_class"].astype(str).eq(asset_class)].sum()) if "asset_class" in rows.columns else 0.0
+            cap_now = max(0.0, min(cap, class_cap - class_used_now))
+            add = min(want, cap_now)
+            weights.at[idx] += add
+            added += add
+            if cap_now - add <= eps:
+                saturated.append(idx)
+        remaining -= added
+        for idx in saturated:
+            active.discard(idx)
+        if added <= eps:
+            break
+    return weights
+
+
+def _apply_weak_defensive_floor(
+    rows: pd.DataFrame,
+    weights: pd.Series,
+    preferences: pd.Series,
+    max_position_pct: float,
+    asset_caps: Dict[str, float],
+    defensive_assets: set,
+    floor_pct: float,
+) -> pd.Series:
+    floor = max(0.0, min(1.0, float(floor_pct)))
+    if floor <= 0 or rows.empty or "asset_class" not in rows.columns:
+        return weights
+    defensive_mask = rows["asset_class"].astype(str).isin(defensive_assets)
+    if not bool(defensive_mask.any()):
+        return weights
+    current = float(weights[defensive_mask].sum())
+    if current >= floor:
+        return weights
+    nondef_mask = ~defensive_mask
+    available = float(weights[nondef_mask].sum())
+    if available <= 0:
+        return weights
+    deficit = min(floor - current, available)
+    out = weights.copy()
+    out.loc[nondef_mask] -= out.loc[nondef_mask] / available * deficit
+    defensive_rows = rows[defensive_mask].copy()
+    add = _distribute_with_caps(
+        defensive_rows,
+        preferences.loc[defensive_rows.index],
+        current + deficit,
+        max_position_pct,
+        asset_caps,
+    )
+    out.loc[defensive_rows.index] = add
+    return out.clip(lower=0.0)
+
+
 def select_rotation_positions(
     candidates: pd.DataFrame,
     hist_map: Dict[str, pd.DataFrame],
@@ -262,6 +372,8 @@ def select_rotation_positions(
     weak_defensive_bonus = float(rot_cfg.get("weak_defensive_bonus", 15.0))
     defensive_assets = set(rot_cfg.get("defensive_asset_classes", ["defensive", "commodity"]))
     target_exposure = float(regime.get("target_exposure", rot_cfg.get("neutral_total_exposure", 0.65)))
+    regime_name = str(regime.get("regime", "neutral"))
+    asset_caps = _asset_class_caps(rot_cfg, regime_name)
 
     pool = candidates[candidates["is_rotation_candidate"].fillna(False)].copy()
     if pool.empty:
@@ -296,16 +408,30 @@ def select_rotation_positions(
 
     out = pd.DataFrame(selected).copy()
     risk = pd.to_numeric(out.get("atr_pct"), errors="coerce").clip(lower=float(rot_cfg.get("min_risk_vol", 0.008)))
-    inv_risk = 1.0 / risk.replace(0, np.nan)
-    raw_weights = inv_risk / inv_risk.sum() if inv_risk.notna().sum() else pd.Series(1.0 / len(out), index=out.index)
-    out["target_weight"] = (raw_weights * target_exposure).clip(upper=max_position_pct)
+    score_power = float(rot_cfg.get("score_weight_power", 1.0))
+    score_pref = (pd.to_numeric(out.get("selection_score", out.get("rotation_score")), errors="coerce").fillna(0.0).clip(lower=1.0) / 100.0) ** score_power
+    preferences = score_pref / risk.replace(0, np.nan)
+    out["target_weight"] = _distribute_with_caps(out, preferences, target_exposure, max_position_pct, asset_caps)
+    if regime_name == "weak":
+        out["target_weight"] = _apply_weak_defensive_floor(
+            out,
+            out["target_weight"],
+            preferences,
+            max_position_pct,
+            asset_caps,
+            defensive_assets,
+            float(rot_cfg.get("weak_min_defensive_pct", 0.0)),
+        )
     out["target_cash"] = out["target_weight"] * float(account)
     close = pd.to_numeric(out.get("close"), errors="coerce")
     shares = np.floor(out["target_cash"] / close / min_lot) * min_lot
     out["target_shares"] = shares.replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
     out["actual_weight_by_lot"] = np.where(account > 0, out["target_shares"] * close / float(account), 0.0)
-    out["regime"] = regime.get("regime", "")
+    out["regime"] = regime_name
     out["regime_summary"] = regime.get("summary", "")
+    out["allocation_note"] = f"目标总仓位{target_exposure:.0%}；单只上限{max_position_pct:.0%}"
+    if asset_caps:
+        out["allocation_note"] += "；资产类别上限 " + ",".join(f"{k}:{v:.0%}" for k, v in sorted(asset_caps.items()))
     return out.reset_index(drop=True)
 
 
@@ -342,6 +468,7 @@ def to_rotation_chinese(df: pd.DataFrame) -> pd.DataFrame:
         "is_rotation_candidate": "是否轮动候选",
         "rotation_reason": "轮动依据",
         "filter_reason": "过滤原因",
+        "allocation_note": "仓位约束说明",
         "regime": "市场状态",
         "target_weight": "目标仓位",
         "actual_weight_by_lot": "按整手实际仓位",
@@ -366,7 +493,7 @@ def to_rotation_chinese(df: pd.DataFrame) -> pd.DataFrame:
         "target_shares", "actual_weight_by_lot", "rotation_score", "selection_score", "is_rotation_candidate",
         "close", "pct_chg", "ret20", "ret60", "ret120", "close_pos120", "drawdown120", "amount_ma20",
         "atr_pct", "trend_component", "momentum_component", "risk_component", "timing_component",
-        "rotation_reason", "filter_reason",
+        "rotation_reason", "allocation_note", "filter_reason",
     ]
     if df is None or df.empty:
         return pd.DataFrame(columns=[mapping.get(c, c) for c in preferred])
@@ -527,12 +654,16 @@ def format_rotation_message(positions: pd.DataFrame, candidates: pd.DataFrame, r
     if positions is None or positions.empty:
         lines.append("当前无ETF轮动配置。")
     else:
-        lines.append(f"本期配置 {len(positions)} 只：")
+        total_weight = float(pd.to_numeric(positions.get("target_weight"), errors="coerce").fillna(0.0).sum())
+        lines.append(f"本期配置 {len(positions)} 只，合计仓位约 {total_weight:.0%}：")
         for _, r in positions.iterrows():
             lines.append(
                 f"- {r.get('code')} {r.get('name')}：仓位{safe_float(r.get('target_weight'), 0):.1%}，"
                 f"轮动分{safe_float(r.get('rotation_score'), 0):.1f}，{r.get('rotation_reason', '')}"
             )
+        note = str(positions.iloc[0].get("allocation_note", "")).strip()
+        if note:
+            lines.append(f"约束：{note}")
     lines.append("")
     lines.append("已生成：latest_etf_rotation_positions.csv、latest_etf_rotation_candidates.csv、latest_etf_rotation_report.md。")
     return "\n".join(lines)

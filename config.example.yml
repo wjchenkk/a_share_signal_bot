@@ -177,7 +177,28 @@ etf:
     weak_total_exposure: 0.35
     defensive_asset_classes: ["defensive", "commodity"]
     weak_defensive_bonus: 15.0
+    weak_min_defensive_pct: 0.20
     min_risk_vol: 0.008
+    score_weight_power: 1.0
+    asset_class_caps:
+      strong:
+        broad: 0.75
+        sector: 0.45
+        cross_border: 0.35
+        defensive: 0.30
+        commodity: 0.20
+      neutral:
+        broad: 0.55
+        sector: 0.35
+        cross_border: 0.30
+        defensive: 0.50
+        commodity: 0.25
+      weak:
+        broad: 0.25
+        sector: 0.15
+        cross_border: 0.20
+        defensive: 0.70
+        commodity: 0.35
   backtest:
     initial_cash: 200000
     years: 3

@@ -382,6 +382,55 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertLessEqual(int((positions["category"] == "宽基").sum()), 1)
         self.assertIn("target_weight", positions.columns)
 
+    def test_etf_rotation_redistributes_after_position_caps(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["max_positions"] = 3
+        cfg["etf"]["rotation"]["max_per_category"] = 3
+        cfg["etf"]["rotation"]["max_position_pct"] = 0.40
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        candidates = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "rotation_score": 95.0, "selection_score": 95.0, "atr_pct": 0.008, "close": 4.0},
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "rotation_score": 80.0, "selection_score": 80.0, "atr_pct": 0.050, "close": 1.2},
+                {"code": "513100", "name": "纳指ETF", "category": "海外", "asset_class": "cross_border", "is_rotation_candidate": True, "rotation_score": 70.0, "selection_score": 70.0, "atr_pct": 0.060, "close": 1.5},
+            ]
+        )
+        hist_map = {
+            "510300": deterministic_hist(3.0, 5.5, periods=260, breakout=False),
+            "512880": deterministic_hist(1.0, 1.8, periods=260, breakout=False),
+            "513100": deterministic_hist(1.0, 1.6, periods=260, breakout=False),
+        }
+        regime = {"regime": "strong", "target_exposure": 0.90, "summary": "测试强势"}
+        positions = etf_rotation.select_rotation_positions(candidates, hist_map, cfg, account=100000.0, regime=regime)
+        self.assertAlmostEqual(float(positions["target_weight"].sum()), 0.90, places=6)
+        self.assertLessEqual(float(positions["target_weight"].max()), 0.4000001)
+
+    def test_etf_rotation_applies_asset_caps_and_defensive_floor(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["max_positions"] = 3
+        cfg["etf"]["rotation"]["max_per_category"] = 3
+        cfg["etf"]["rotation"]["max_position_pct"] = 0.50
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        cfg["etf"]["rotation"]["weak_min_defensive_pct"] = 0.20
+        candidates = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "rotation_score": 95.0, "selection_score": 95.0, "atr_pct": 0.010, "close": 4.0},
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "rotation_score": 85.0, "selection_score": 85.0, "atr_pct": 0.015, "close": 1.2},
+                {"code": "511010", "name": "国债ETF", "category": "债券", "asset_class": "defensive", "is_rotation_candidate": True, "rotation_score": 40.0, "selection_score": 40.0, "atr_pct": 0.006, "close": 1.1},
+            ]
+        )
+        hist_map = {
+            "510300": deterministic_hist(3.0, 4.0, periods=260, breakout=False),
+            "512880": deterministic_hist(1.0, 1.4, periods=260, breakout=False),
+            "511010": deterministic_hist(1.0, 1.1, periods=260, breakout=False),
+        }
+        regime = {"regime": "weak", "target_exposure": 0.35, "summary": "测试弱势"}
+        positions = etf_rotation.select_rotation_positions(candidates, hist_map, cfg, account=100000.0, regime=regime)
+        broad_weight = float(positions.loc[positions["asset_class"].eq("broad"), "target_weight"].sum())
+        defensive_weight = float(positions.loc[positions["asset_class"].eq("defensive"), "target_weight"].sum())
+        self.assertLessEqual(broad_weight, 0.2500001)
+        self.assertGreaterEqual(defensive_weight, 0.20)
+
     def test_etf_rotation_backtest_outputs_summary(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
         cfg["etf"]["rotation"]["min_history_days"] = 120
