@@ -230,16 +230,29 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "max_drawdown120": -0.24
         },
         "rotation": {
+            "model": "relative_momentum",
             "min_history_days": 180,
             "min_amount_ma20": 20_000_000,
             "score_threshold": 55.0,
             "min_ret60": -0.03,
             "require_ma60": True,
-            "max_positions": 5,
+            "max_positions": 4,
             "max_per_category": 2,
             "max_position_pct": 0.25,
             "max_correlation": 0.92,
             "correlation_lookback": 120,
+            "relative_momentum": {
+                "score_weights": {
+                    "ret20": 0.35,
+                    "ret60": 0.45,
+                    "ret120": 0.20
+                },
+                "min_ret60": 0.0,
+                "allow_defensive": False,
+                "target_exposure": 1.0,
+                "max_per_asset_class": 2,
+                "allocation": "equal_weight"
+            },
             "core_broad_regimes": ["strong", "neutral"],
             "core_broad_min_score": 55.0,
             "strong_ret60": 0.04,

@@ -149,6 +149,44 @@ def compute_rotation_candidates(
         + out["timing_component"]
     ).clip(0, 100)
 
+    if str(rot_cfg.get("model", "balanced")) == "relative_momentum":
+        rel_cfg = rot_cfg.get("relative_momentum", {})
+        score_weights = dict(rel_cfg.get("score_weights", {}))
+        w20 = float(score_weights.get("ret20", 0.35))
+        w60 = float(score_weights.get("ret60", 0.45))
+        w120 = float(score_weights.get("ret120", 0.20))
+        total_w = max(1e-9, abs(w20) + abs(w60) + abs(w120))
+        w20, w60, w120 = w20 / total_w, w60 / total_w, w120 / total_w
+        out["momentum_signal"] = (
+            pd.to_numeric(out.get("ret20"), errors="coerce").fillna(-1.0) * w20
+            + pd.to_numeric(out.get("ret60"), errors="coerce").fillna(-1.0) * w60
+            + pd.to_numeric(out.get("ret120"), errors="coerce").fillna(-1.0) * w120
+        )
+        out["rotation_score"] = _rank_pct(out["momentum_signal"], True) * 100.0
+        min_rel_ret60 = float(rel_cfg.get("min_ret60", 0.0))
+        allow_defensive = bool(rel_cfg.get("allow_defensive", False))
+        defensive_assets = set(rot_cfg.get("defensive_asset_classes", ["defensive", "commodity"]))
+        reasons = []
+        candidates = []
+        filters = []
+        for _, r in out.iterrows():
+            local_filters = split_reason_text(r.get("filter_reason", ""))
+            asset_class = str(r.get("asset_class", ""))
+            if (not allow_defensive) and asset_class in defensive_assets:
+                local_filters.append("相对动量模式排除防守资产")
+            if safe_float(r.get("ret60"), -1.0) < min_rel_ret60:
+                local_filters.append(f"60日动量低于{min_rel_ret60:.1%}")
+            candidates.append(len(local_filters) == 0)
+            filters.append("；".join(unique_nonempty(local_filters)))
+            reasons.append(
+                f"20/60/120日动量加权{safe_float(r.get('momentum_signal'), 0.0):.2%}；"
+                f"60日收益{safe_float(r.get('ret60'), 0.0):.2%}"
+            )
+        out["is_rotation_candidate"] = candidates
+        out["filter_reason"] = filters
+        out["rotation_reason"] = reasons
+        return out.sort_values(["is_rotation_candidate", "momentum_signal"], ascending=[False, False]).reset_index(drop=True)
+
     score_threshold = float(rot_cfg.get("score_threshold", 55.0))
     min_ret60 = float(rot_cfg.get("min_ret60", -0.03))
     require_ma60 = bool(rot_cfg.get("require_ma60", True))
@@ -195,6 +233,15 @@ def market_regime_from_candidates(candidates: pd.DataFrame, cfg: Dict[str, Any])
         broad = candidates.copy()
     avg_ret60 = float(pd.to_numeric(broad.get("ret60"), errors="coerce").mean())
     above_rate = float(broad.get("above_ma60", pd.Series(dtype=bool)).fillna(False).mean())
+    if str(rot_cfg.get("model", "balanced")) == "relative_momentum":
+        exposure = float(rot_cfg.get("relative_momentum", {}).get("target_exposure", 1.0))
+        return {
+            "regime": "relative_momentum",
+            "target_exposure": exposure,
+            "avg_ret60": avg_ret60,
+            "above_ma60_rate": above_rate,
+            "summary": f"ETF相对动量：权益ETF 60日均收益{avg_ret60:.2%}，目标仓位{exposure:.0%}",
+        }
     if avg_ret60 >= float(rot_cfg.get("strong_ret60", 0.04)) and above_rate >= float(rot_cfg.get("strong_above_ma60_rate", 0.60)):
         regime = "strong"
         exposure = float(rot_cfg.get("strong_total_exposure", 0.90))
@@ -364,8 +411,10 @@ def select_rotation_positions(
         return pd.DataFrame()
     etf_cfg = cfg.get("etf", {})
     rot_cfg = etf_cfg.get("rotation", {})
+    model = str(rot_cfg.get("model", "balanced"))
     regime = regime or market_regime_from_candidates(candidates, cfg)
-    max_positions = int(rot_cfg.get("max_positions", etf_cfg.get("max_positions", 5)))
+    rel_cfg = rot_cfg.get("relative_momentum", {}) if model == "relative_momentum" else {}
+    max_positions = int(rel_cfg.get("top_n", rot_cfg.get("max_positions", etf_cfg.get("max_positions", 5))))
     max_per_category = int(rot_cfg.get("max_per_category", 2))
     max_position_pct = float(rot_cfg.get("max_position_pct", etf_cfg.get("max_position_pct", 0.25)))
     min_lot = int(etf_cfg.get("min_lot", 100))
@@ -380,7 +429,12 @@ def select_rotation_positions(
     pool = candidates[candidates["is_rotation_candidate"].fillna(False)].copy()
     if pool.empty:
         return pd.DataFrame()
-    pool["selection_score"] = pd.to_numeric(pool["rotation_score"], errors="coerce").fillna(0.0)
+    if model == "relative_momentum" and not bool(rel_cfg.get("allow_defensive", False)):
+        pool = pool[~pool["asset_class"].astype(str).isin(defensive_assets)].copy()
+        if pool.empty:
+            return pd.DataFrame()
+    score_col = "momentum_signal" if model == "relative_momentum" and "momentum_signal" in pool.columns else "rotation_score"
+    pool["selection_score"] = pd.to_numeric(pool[score_col], errors="coerce").fillna(0.0)
     if regime.get("regime") == "weak":
         pool.loc[pool["asset_class"].isin(defensive_assets), "selection_score"] += weak_defensive_bonus
     pool = pool.sort_values(["selection_score", "rotation_score"], ascending=[False, False])
@@ -389,11 +443,12 @@ def select_rotation_positions(
     selected: List[pd.Series] = []
     selected_codes: List[str] = []
     category_counts: Dict[str, int] = {}
+    asset_class_counts: Dict[str, int] = {}
     skip_notes: Dict[str, str] = {}
 
     core_broad_regimes = set(str(x) for x in rot_cfg.get("core_broad_regimes", []))
     core_broad_min_score = float(rot_cfg.get("core_broad_min_score", 55.0))
-    if regime_name in core_broad_regimes:
+    if model != "relative_momentum" and regime_name in core_broad_regimes:
         broad_pool = pool[
             pool["asset_class"].astype(str).eq("broad")
             & (pd.to_numeric(pool["selection_score"], errors="coerce").fillna(0.0) >= core_broad_min_score)
@@ -405,7 +460,10 @@ def select_rotation_positions(
             selected_codes.append(code)
             category = str(broad_row.get("category", "未分组") or "未分组")
             category_counts[category] = category_counts.get(category, 0) + 1
+            asset_class = str(broad_row.get("asset_class", ""))
+            asset_class_counts[asset_class] = asset_class_counts.get(asset_class, 0) + 1
 
+    max_per_asset_class = int(rel_cfg.get("max_per_asset_class", 0) or 0)
     for _, row in pool.iterrows():
         code = normalize_code(row.get("code", ""))
         if code in selected_codes:
@@ -414,6 +472,10 @@ def select_rotation_positions(
         if category_counts.get(category, 0) >= max_per_category:
             skip_notes[code] = f"同类别{category}已达上限"
             continue
+        asset_class = str(row.get("asset_class", ""))
+        if max_per_asset_class > 0 and asset_class_counts.get(asset_class, 0) >= max_per_asset_class:
+            skip_notes[code] = f"同资产类别{asset_class}已达上限"
+            continue
         corr = _max_selected_corr(code, selected_codes, returns, corr_lookback)
         if corr > max_corr:
             skip_notes[code] = f"与已选ETF相关性{corr:.2f}高于{max_corr:.2f}"
@@ -421,27 +483,32 @@ def select_rotation_positions(
         selected.append(row)
         selected_codes.append(code)
         category_counts[category] = category_counts.get(category, 0) + 1
+        asset_class_counts[asset_class] = asset_class_counts.get(asset_class, 0) + 1
         if len(selected) >= max_positions:
             break
     if not selected:
         return pd.DataFrame()
 
     out = pd.DataFrame(selected).copy()
-    risk = pd.to_numeric(out.get("atr_pct"), errors="coerce").clip(lower=float(rot_cfg.get("min_risk_vol", 0.008)))
-    score_power = float(rot_cfg.get("score_weight_power", 1.0))
-    score_pref = (pd.to_numeric(out.get("selection_score", out.get("rotation_score")), errors="coerce").fillna(0.0).clip(lower=1.0) / 100.0) ** score_power
-    preferences = score_pref / risk.replace(0, np.nan)
-    out["target_weight"] = _distribute_with_caps(out, preferences, target_exposure, max_position_pct, asset_caps)
-    if regime_name == "weak":
-        out["target_weight"] = _apply_weak_defensive_floor(
-            out,
-            out["target_weight"],
-            preferences,
-            max_position_pct,
-            asset_caps,
-            defensive_assets,
-            float(rot_cfg.get("weak_min_defensive_pct", 0.0)),
-        )
+    if model == "relative_momentum" and str(rel_cfg.get("allocation", "equal_weight")) == "equal_weight":
+        equal_weight = min(max_position_pct, target_exposure / max(1, len(out)))
+        out["target_weight"] = equal_weight
+    else:
+        risk = pd.to_numeric(out.get("atr_pct"), errors="coerce").clip(lower=float(rot_cfg.get("min_risk_vol", 0.008)))
+        score_power = float(rot_cfg.get("score_weight_power", 1.0))
+        score_pref = (pd.to_numeric(out.get("selection_score", out.get("rotation_score")), errors="coerce").fillna(0.0).clip(lower=1.0) / 100.0) ** score_power
+        preferences = score_pref / risk.replace(0, np.nan)
+        out["target_weight"] = _distribute_with_caps(out, preferences, target_exposure, max_position_pct, asset_caps)
+        if regime_name == "weak":
+            out["target_weight"] = _apply_weak_defensive_floor(
+                out,
+                out["target_weight"],
+                preferences,
+                max_position_pct,
+                asset_caps,
+                defensive_assets,
+                float(rot_cfg.get("weak_min_defensive_pct", 0.0)),
+            )
     out["target_cash"] = out["target_weight"] * float(account)
     close = pd.to_numeric(out.get("close"), errors="coerce")
     shares = np.floor(out["target_cash"] / close / min_lot) * min_lot
@@ -681,8 +748,18 @@ def backtest_rotation(
     summary = summarize_equity(equity_df, total_turnover)
     summary["benchmark_code"] = summary_benchmark_code
     if "benchmark_equity" in equity_df.columns:
-        summary["benchmark_total_return"] = float(equity_df["benchmark_equity"].iloc[-1] / equity_df["benchmark_equity"].iloc[0] - 1.0)
-        summary["benchmark_max_drawdown"] = max_drawdown(equity_df["benchmark_equity"])
+        bench_summary = summarize_equity(
+            equity_df[["date", "benchmark_equity"]].rename(columns={"benchmark_equity": "equity"}),
+            0.0,
+        )
+        summary["benchmark_total_return"] = bench_summary.get("total_return", np.nan)
+        summary["benchmark_annual_return"] = bench_summary.get("annual_return", np.nan)
+        summary["benchmark_max_drawdown"] = bench_summary.get("max_drawdown", np.nan)
+        summary["benchmark_annual_volatility"] = bench_summary.get("annual_volatility", np.nan)
+        summary["benchmark_sharpe"] = bench_summary.get("sharpe", np.nan)
+        summary["excess_total_return"] = safe_float(summary.get("total_return"), np.nan) - safe_float(summary.get("benchmark_total_return"), np.nan)
+        summary["excess_annual_return"] = safe_float(summary.get("annual_return"), np.nan) - safe_float(summary.get("benchmark_annual_return"), np.nan)
+        summary["excess_sharpe"] = safe_float(summary.get("sharpe"), np.nan) - safe_float(summary.get("benchmark_sharpe"), np.nan)
     summary["rebalance_count"] = len(pd.DataFrame(rebalance_rows)["date"].drop_duplicates()) if rebalance_rows else 0
     summary["avg_turnover_per_rebalance"] = total_turnover / max(1, summary["rebalance_count"])
     return equity_df, pd.DataFrame(rebalance_rows), summary
@@ -761,11 +838,16 @@ def write_backtest_outputs(out_dir: Path, equity: pd.DataFrame, rebalances: pd.D
         lines.append(f"- 总收益：{safe_float(summary.get('total_return'), 0):.2%}")
         lines.append(f"- 年化收益：{safe_float(summary.get('annual_return'), 0):.2%}")
         lines.append(f"- 最大回撤：{safe_float(summary.get('max_drawdown'), 0):.2%}")
+        lines.append(f"- 年化波动：{safe_float(summary.get('annual_volatility'), 0):.2%}")
         lines.append(f"- 夏普：{safe_float(summary.get('sharpe'), np.nan):.2f}")
         if "benchmark_total_return" in summary:
             lines.append(f"- 基准代码：{summary.get('benchmark_code', '')}")
             lines.append(f"- 基准总收益：{safe_float(summary.get('benchmark_total_return'), 0):.2%}")
+            lines.append(f"- 基准年化收益：{safe_float(summary.get('benchmark_annual_return'), 0):.2%}")
             lines.append(f"- 基准最大回撤：{safe_float(summary.get('benchmark_max_drawdown'), 0):.2%}")
+            lines.append(f"- 基准夏普：{safe_float(summary.get('benchmark_sharpe'), np.nan):.2f}")
+            lines.append(f"- 超额总收益：{safe_float(summary.get('excess_total_return'), 0):.2%}")
+            lines.append(f"- 超额年化收益：{safe_float(summary.get('excess_annual_return'), 0):.2%}")
         lines.append(f"- 再平衡次数：{summary.get('rebalance_count', 0)}")
     else:
         lines.append("回测没有生成有效结果。")

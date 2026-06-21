@@ -561,6 +561,7 @@ class OfflineRegressionTests(unittest.TestCase):
 
     def test_etf_rotation_redistributes_after_position_caps(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "balanced"
         cfg["etf"]["rotation"]["max_positions"] = 3
         cfg["etf"]["rotation"]["max_per_category"] = 3
         cfg["etf"]["rotation"]["max_position_pct"] = 0.40
@@ -584,6 +585,7 @@ class OfflineRegressionTests(unittest.TestCase):
 
     def test_etf_rotation_applies_asset_caps_and_defensive_floor(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "balanced"
         cfg["etf"]["rotation"]["max_positions"] = 3
         cfg["etf"]["rotation"]["max_per_category"] = 3
         cfg["etf"]["rotation"]["max_position_pct"] = 0.50
@@ -610,6 +612,7 @@ class OfflineRegressionTests(unittest.TestCase):
 
     def test_etf_rotation_strong_regime_keeps_core_broad_position(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "balanced"
         cfg["etf"]["rotation"]["max_positions"] = 2
         cfg["etf"]["rotation"]["max_per_category"] = 2
         cfg["etf"]["rotation"]["max_position_pct"] = 0.50
@@ -636,6 +639,39 @@ class OfflineRegressionTests(unittest.TestCase):
             regime={"regime": "strong", "target_exposure": 0.90, "summary": "测试强势"},
         )
         self.assertIn("510300", positions["code"].astype(str).tolist())
+
+    def test_etf_relative_momentum_excludes_defensive_and_equal_weights(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "relative_momentum"
+        cfg["etf"]["rotation"]["max_positions"] = 3
+        cfg["etf"]["rotation"]["max_position_pct"] = 0.40
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        cfg["etf"]["rotation"]["relative_momentum"]["target_exposure"] = 0.90
+        cfg["etf"]["rotation"]["relative_momentum"]["allow_defensive"] = False
+        candidates = pd.DataFrame(
+            [
+                {"code": "511010", "name": "国债ETF", "category": "债券", "asset_class": "defensive", "is_rotation_candidate": True, "momentum_signal": 0.50, "rotation_score": 99.0, "atr_pct": 0.006, "close": 1.1},
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "momentum_signal": 0.30, "rotation_score": 90.0, "atr_pct": 0.030, "close": 1.2},
+                {"code": "513100", "name": "纳指ETF", "category": "海外", "asset_class": "cross_border", "is_rotation_candidate": True, "momentum_signal": 0.25, "rotation_score": 85.0, "atr_pct": 0.035, "close": 1.5},
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "momentum_signal": 0.20, "rotation_score": 80.0, "atr_pct": 0.020, "close": 4.0},
+            ]
+        )
+        hist_map = {
+            "511010": deterministic_hist(1.0, 1.1, periods=260),
+            "512880": deterministic_hist(1.0, 1.8, periods=260),
+            "513100": deterministic_hist(1.0, 1.7, periods=260),
+            "510300": deterministic_hist(3.0, 4.0, periods=260),
+        }
+        positions = etf_rotation.select_rotation_positions(
+            candidates,
+            hist_map,
+            cfg,
+            account=100000.0,
+            regime={"regime": "relative_momentum", "target_exposure": 0.90, "summary": "测试相对动量"},
+        )
+        self.assertNotIn("511010", positions["code"].astype(str).tolist())
+        self.assertAlmostEqual(float(positions["target_weight"].sum()), 0.90, places=6)
+        self.assertTrue((positions["target_weight"].round(6) == 0.30).all())
 
     def test_etf_rotation_rejects_low_history_coverage(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
@@ -683,6 +719,8 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertIn("max_drawdown", summary)
         self.assertIn("benchmark_total_return", summary)
         self.assertEqual(summary.get("benchmark_code"), "510300")
+        self.assertIn("benchmark_sharpe", summary)
+        self.assertIn("excess_total_return", summary)
         self.assertTrue(np.isfinite(float(summary["benchmark_total_return"])))
         self.assertGreaterEqual(len(rebalances), 1)
 
