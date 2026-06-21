@@ -239,7 +239,7 @@ class EtfPoolFetcher:
             except Exception:
                 return None
         latest = self.cache_dir / f"latest_etf_spot_{source}.csv"
-        if latest.exists() and not self.refresh:
+        if latest.exists() and (not self.refresh) and is_cache_fresh(latest, self.cache_hours):
             try:
                 return pd.read_csv(latest, dtype=str)
             except Exception:

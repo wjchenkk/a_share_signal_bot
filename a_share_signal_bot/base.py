@@ -203,6 +203,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "use_stale_cache_on_network_error": True,
         "fail_fast_network_errors": True,
         "max_error_rate_for_valid_run": 0.20,
+        "max_data_lag_days": 3,
         "min_history_days": 180,
         "min_amount_ma20": 20_000_000,
         "score_threshold": 70.0,

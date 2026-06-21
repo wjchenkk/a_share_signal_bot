@@ -263,6 +263,25 @@ def compute_rotation_candidates(
     if out.empty:
         return out
 
+    max_lag_days = int(rot_cfg.get("max_data_lag_days", etf_cfg.get("max_data_lag_days", 3)) or 0)
+    if max_lag_days >= 0 and "date" in out.columns:
+        dates = pd.to_datetime(out["date"], errors="coerce")
+        valid_dates = dates.dropna()
+        if not valid_dates.empty:
+            latest = pd.Timestamp(valid_dates.max()).normalize()
+            stale_mask = dates.notna() & (dates.dt.normalize() < latest - pd.Timedelta(days=max_lag_days))
+            if stale_mask.any():
+                warning = f"ETF行情日期滞后超过{max_lag_days}天，最新有效日期{latest.strftime('%Y-%m-%d')}"
+                if "filter_reason" not in out.columns:
+                    out["filter_reason"] = ""
+                out.loc[stale_mask, "filter_reason"] = (
+                    out.loc[stale_mask, "filter_reason"].astype(str).replace("nan", "").str.strip()
+                    + "；"
+                    + warning
+                ).str.strip("；")
+                out.loc[stale_mask, "tradable"] = False
+                out.loc[stale_mask, "data_quality_warning"] = warning
+
     out["trend_component"] = 0.0
     out.loc[out["above_ma20"].fillna(False), "trend_component"] += 6.0
     out.loc[out["above_ma60"].fillna(False), "trend_component"] += 8.0

@@ -160,6 +160,7 @@ class EtfFetcher:
             if df.empty:
                 continue
             df.attrs["data_provider"] = "stale_cache"
+            df.attrs["data_warning"] = f"ETF数据源失败，使用本地旧缓存：{f.name}"
             return df
         return None
 
@@ -523,6 +524,35 @@ def allocate_etf_positions(signals: pd.DataFrame, cfg: Dict[str, Any], account: 
     return out.reset_index(drop=True)
 
 
+def apply_etf_data_lag_guard(candidates: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+    if candidates is None or candidates.empty or "date" not in candidates.columns:
+        return candidates
+    max_lag_days = int(cfg.get("etf", {}).get("max_data_lag_days", 3) or 0)
+    if max_lag_days < 0:
+        return candidates
+    out = candidates.copy()
+    dates = pd.to_datetime(out["date"], errors="coerce")
+    valid_dates = dates.dropna()
+    if valid_dates.empty:
+        return out
+    latest = pd.Timestamp(valid_dates.max()).normalize()
+    stale_mask = dates.notna() & (dates.dt.normalize() < latest - pd.Timedelta(days=max_lag_days))
+    if not stale_mask.any():
+        return out
+    warning = f"ETF行情日期滞后超过{max_lag_days}天，最新有效日期{latest.strftime('%Y-%m-%d')}，不生成买入候选"
+    if "filter_reason" not in out.columns:
+        out["filter_reason"] = ""
+    out.loc[stale_mask, "filter_reason"] = (
+        out.loc[stale_mask, "filter_reason"].astype(str).replace("nan", "").str.strip()
+        + "；"
+        + warning
+    ).str.strip("；")
+    out.loc[stale_mask, "ok_base"] = False
+    out.loc[stale_mask, "is_signal"] = False
+    out.loc[stale_mask, "data_quality_warning"] = warning
+    return out
+
+
 def to_chinese_columns(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {
         "date": "日期",
@@ -691,6 +721,15 @@ def scan_etf(
             candidates["is_signal"] = False
         if "score" not in candidates.columns:
             candidates["score"] = 0.0
+        candidates = apply_etf_data_lag_guard(candidates, cfg)
+        data_error_count = int(candidates["filter_reason"].astype(str).str.contains("数据错误", na=False).sum()) if "filter_reason" in candidates.columns else len(errors)
+        data_error_rate = (data_error_count / total) if total else 0.0
+        max_error_rate = float(etf_cfg.get("max_error_rate_for_valid_run", cfg.get("data", {}).get("max_error_rate_for_valid_run", 0.20)))
+        if data_error_rate > max_error_rate:
+            warning = f"ETF数据源失败率 {data_error_rate:.0%} 超过阈值 {max_error_rate:.0%}，本次结果仅供检查，不生成买入配置"
+            print(f"[ETF数据] {warning}")
+            candidates["is_signal"] = False
+            candidates["data_quality_warning"] = warning
         candidates = candidates.sort_values(["is_signal", "score"], ascending=[False, False], na_position="last").reset_index(drop=True)
     signals = candidates[candidates.get("is_signal", False) == True].copy() if not candidates.empty else pd.DataFrame()
     allocated = allocate_etf_positions(signals, cfg, account)

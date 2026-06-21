@@ -166,6 +166,20 @@ class FailingEtfFetcher:
         raise RuntimeError("NameResolutionError: Failed to resolve ETF source")
 
 
+class PartiallyFailingEtfFetcher:
+    def __init__(self, cfg, refresh: bool = False):
+        self.cfg = cfg
+        self.refresh = refresh
+
+    def etf_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+        code = str(code).zfill(6)
+        if code == "510300":
+            df = deterministic_hist(3.0, 5.3, periods=280, breakout=True)
+            df.attrs["data_provider"] = "deterministic_etf"
+            return df
+        raise RuntimeError("NameResolutionError: Failed to resolve ETF source")
+
+
 class DeterministicEtfPoolFetcher:
     def __init__(self, cfg, cache_dir: str = "", refresh: bool = False):
         self.cfg = cfg
@@ -348,6 +362,46 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(market.regime, "weak")
         self.assertEqual(float(market.target_exposure), 0.0)
         self.assertIn("指数数据日期不一致", market.summary)
+
+    def test_board_symbol_lookup_prefers_fresh_source_over_stale_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["data"]["cache_dir"] = td
+            cfg["data"]["cache_hours"] = 1
+            stale_path = Path(td) / "board_industry_names.csv"
+            pd.DataFrame([{"板块名称": "旧行业", "板块代码": "old"}]).to_csv(stale_path, index=False, encoding="utf-8-sig")
+            old_ts = time.time() - 48 * 3600
+            os.utime(stale_path, (old_ts, old_ts))
+            fetcher = AkshareFetcher(cfg)
+            fetcher.board_names = lambda kind: pd.DataFrame([{"板块名称": "新行业", "板块代码": "new"}])  # type: ignore[method-assign]
+            valid_names, code_to_name = fetcher._board_symbol_lookup("industry")
+            self.assertIn("新行业", valid_names)
+            self.assertNotIn("旧行业", valid_names)
+            self.assertEqual(code_to_name["new"], "新行业")
+
+    def test_ths_concept_lookup_prefers_fresh_source_over_stale_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["data"]["cache_dir"] = td
+            cfg["data"]["cache_hours"] = 1
+            stale_path = Path(td) / "board_concept_ths_names.csv"
+            pd.DataFrame([{"概念名称": "旧概念", "代码": "old"}]).to_csv(stale_path, index=False, encoding="utf-8-sig")
+            old_ts = time.time() - 48 * 3600
+            os.utime(stale_path, (old_ts, old_ts))
+            fresh = pd.DataFrame([{"概念名称": "新概念", "代码": "new"}])
+            old_ak = sys.modules.get("akshare")
+            sys.modules["akshare"] = types.SimpleNamespace(stock_board_concept_name_ths=lambda: fresh)
+            try:
+                fetcher = AkshareFetcher(cfg)
+                names, code_to_name = fetcher._ths_concept_hist_lookup()
+            finally:
+                if old_ak is None:
+                    sys.modules.pop("akshare", None)
+                else:
+                    sys.modules["akshare"] = old_ak
+            self.assertIn("新概念", names)
+            self.assertNotIn("旧概念", names)
+            self.assertEqual(code_to_name["new"], "新概念")
 
     def test_stock_tail_appends_changed_realtime_snapshot(self) -> None:
         hist = deterministic_hist(10.0, 12.0, periods=220)
@@ -633,6 +687,117 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertIn("数据错误", str(candidates.iloc[0]["filter_reason"]))
             self.assertTrue((out_dir / "latest_etf_errors.csv").exists())
 
+    def test_etf_scan_suppresses_signals_when_error_rate_too_high(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool_path = root / "etf_pool.csv"
+            pool_path.write_text(
+                "code,name,category\n"
+                "510300,沪深300ETF,宽基\n"
+                "159915,创业板ETF,宽基\n"
+                "512880,证券ETF,证券\n",
+                encoding="utf-8-sig",
+            )
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["output"]["cleanup_on_run"] = False
+            cfg["etf"]["cache_dir"] = str(root / "cache" / "etf")
+            cfg["etf"]["min_amount_ma20"] = 1
+            cfg["etf"]["score_threshold"] = 1.0
+            cfg["etf"]["max_error_rate_for_valid_run"] = 0.20
+            out_dir = root / "etf_out"
+
+            old_fetcher = etf_strategy.EtfFetcher
+            try:
+                etf_strategy.EtfFetcher = PartiallyFailingEtfFetcher
+                allocated, candidates, _ = etf_strategy.scan_etf(
+                    str(pool_path),
+                    cfg,
+                    str(out_dir),
+                    account=100000.0,
+                    refresh=False,
+                    limit=0,
+                )
+            finally:
+                etf_strategy.EtfFetcher = old_fetcher
+
+            self.assertTrue(allocated.empty)
+            self.assertFalse(candidates["is_signal"].fillna(False).any())
+            self.assertIn("data_quality_warning", candidates.columns)
+            self.assertTrue(candidates["data_quality_warning"].astype(str).str.contains("失败率").any())
+
+    def test_etf_scan_filters_stale_history_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool_path = root / "etf_pool.csv"
+            pool_path.write_text(
+                "code,name,category\n"
+                "510300,沪深300ETF,宽基\n"
+                "159915,创业板ETF,宽基\n",
+                encoding="utf-8-sig",
+            )
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["output"]["cleanup_on_run"] = False
+            cfg["etf"]["cache_dir"] = str(root / "cache" / "etf")
+            cfg["etf"]["min_amount_ma20"] = 1
+            cfg["etf"]["score_threshold"] = 1.0
+            cfg["etf"]["max_data_lag_days"] = 3
+
+            class SplitDateEtfFetcher:
+                def __init__(self, cfg, refresh: bool = False):
+                    pass
+
+                def etf_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+                    df = deterministic_hist(3.0, 5.3, periods=280, breakout=True)
+                    end = "2026-06-18" if str(code).zfill(6) == "510300" else "2026-06-10"
+                    df["date"] = pd.date_range(end=end, periods=len(df), freq="B")
+                    return df
+
+            old_fetcher = etf_strategy.EtfFetcher
+            try:
+                etf_strategy.EtfFetcher = SplitDateEtfFetcher
+                allocated, candidates, _ = etf_strategy.scan_etf(
+                    str(pool_path),
+                    cfg,
+                    str(root / "etf_out"),
+                    account=100000.0,
+                    refresh=False,
+                    limit=0,
+                )
+            finally:
+                etf_strategy.EtfFetcher = old_fetcher
+
+            by_code = candidates.set_index("code")
+            self.assertFalse(bool(by_code.loc["159915", "is_signal"]))
+            self.assertIn("行情日期滞后", str(by_code.loc["159915", "filter_reason"]))
+            self.assertNotIn("159915", allocated["code"].astype(str).tolist())
+
+    def test_etf_pool_fetcher_ignores_stale_latest_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["etf"]["pool_builder"]["cache_hours"] = 1
+            cache_dir = root / "cache" / "etf_pool"
+            cache_dir.mkdir(parents=True)
+            latest = cache_dir / "latest_etf_spot_eastmoney.csv"
+            pd.DataFrame([{"代码": "510999", "名称": "旧ETF", "最新价": 1.0, "成交额": "1亿"}]).to_csv(latest, index=False, encoding="utf-8-sig")
+            old_ts = time.time() - 48 * 3600
+            os.utime(latest, (old_ts, old_ts))
+
+            fresh_raw = pd.DataFrame([{"代码": "510300", "名称": "沪深300ETF", "最新价": 4.2, "成交额": "10亿"}])
+            old_ak = sys.modules.get("akshare")
+            sys.modules["akshare"] = types.SimpleNamespace(fund_etf_spot_em=lambda: fresh_raw)
+            try:
+                fetcher = etf_pool.EtfPoolFetcher(cfg, cache_dir, refresh=False)
+                out = fetcher.fetch_source("eastmoney")
+            finally:
+                if old_ak is None:
+                    sys.modules.pop("akshare", None)
+                else:
+                    sys.modules["akshare"] = old_ak
+
+            self.assertEqual(out["code"].tolist(), ["510300"])
+            self.assertNotIn("510999", out["code"].tolist())
+
     def test_etf_pool_builder_selects_liquid_diversified_pool(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
         cfg["etf"]["pool_builder"]["min_amount"] = 1
@@ -807,6 +972,33 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertFalse(positions.empty)
         self.assertLessEqual(int((positions["category"] == "宽基").sum()), 1)
         self.assertIn("target_weight", positions.columns)
+
+    def test_etf_rotation_filters_stale_history_dates(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["model"] = "relative_momentum"
+        cfg["etf"]["rotation"]["min_history_days"] = 120
+        cfg["etf"]["rotation"]["min_amount_ma20"] = 1
+        cfg["etf"]["rotation"]["relative_momentum"]["min_ret60"] = -1.0
+        cfg["etf"]["rotation"]["relative_momentum"]["allow_defensive"] = True
+        cfg["etf"]["max_data_lag_days"] = 3
+        pool = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基"},
+                {"code": "159915", "name": "创业板ETF", "category": "宽基"},
+            ]
+        )
+        fresh = deterministic_hist(3.0, 5.3, periods=280, breakout=True)
+        fresh["date"] = pd.date_range(end="2026-06-18", periods=len(fresh), freq="B")
+        stale = deterministic_hist(3.0, 7.0, periods=280, breakout=True)
+        stale["date"] = pd.date_range(end="2026-06-10", periods=len(stale), freq="B")
+        candidates = etf_rotation.compute_rotation_candidates(
+            pool,
+            {"510300": fresh, "159915": stale},
+            cfg,
+        )
+        by_code = candidates.set_index("code")
+        self.assertFalse(bool(by_code.loc["159915", "is_rotation_candidate"]))
+        self.assertIn("行情日期滞后", str(by_code.loc["159915", "filter_reason"]))
 
     def test_etf_rotation_redistributes_after_position_caps(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)

@@ -103,7 +103,7 @@ class AkshareFetcher:
         kind = normalize_board_source(kind)
         if kind in self._board_symbol_cache:
             return self._board_symbol_cache[kind]
-        names = self._read_cache(self.cache_dir / f"board_{kind}_names.csv", ignore_freshness=True) if self.allow_stale_cache_on_error else None
+        names = self._read_cache(self.cache_dir / f"board_{kind}_names.csv")
         if names is None:
             names = self.board_names(kind)
         valid_names: set = set()
@@ -171,7 +171,7 @@ class AkshareFetcher:
         if self._ths_concept_hist_symbol_cache is not None:
             return self._ths_concept_hist_symbol_cache
         cache_path = self.cache_dir / "board_concept_ths_names.csv"
-        names = self._read_cache(cache_path, ignore_freshness=True)
+        names = self._read_cache(cache_path)
         if names is None:
             try:
                 import akshare as ak
@@ -179,8 +179,10 @@ class AkshareFetcher:
                 self._write_cache(names, cache_path)
                 time.sleep(self.sleep_seconds)
             except Exception:
-                self._ths_concept_hist_symbol_cache = (set(), {})
-                return self._ths_concept_hist_symbol_cache
+                names = self._read_cache(cache_path, ignore_freshness=True) if self.allow_stale_cache_on_error else None
+                if names is None:
+                    self._ths_concept_hist_symbol_cache = (set(), {})
+                    return self._ths_concept_hist_symbol_cache
         valid_names: set = set()
         code_to_name: Dict[str, str] = {}
         cols = {str(c).strip(): c for c in names.columns}
