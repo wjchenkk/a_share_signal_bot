@@ -415,6 +415,38 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_history_files": 300,
         "keep_latest_files": True,
     },
+    "space_cleanup": {
+        "output_dirs": [
+            "output",
+            "backtest_output",
+            "backtest_output_strict_t1",
+            "backtest_2022_now",
+            "bt_strict_2y_slip20",
+            "position_strategy_backtest_output",
+            "etf_output",
+            "fund_output",
+            "position_output",
+            "trade_output",
+        ],
+        "cache_dirs": [
+            "cache/hot_pool",
+            "cache/etf",
+            "cache/etf_pool",
+            "cache/fund_dca",
+            "cache/intraday_snapshots",
+        ],
+        "backup_dirs": ["pool_backups", "portfolio_backups", "trade_state_backups"],
+        "comparison_dir_globs": ["backtest_compare_*", "etf_output_compare_*"],
+        "output_retention_days": 14,
+        "cache_retention_days": 60,
+        "backup_retention_days": 90,
+        "comparison_retention_days": 0,
+        "max_history_files_per_dir": 300,
+        "backup_keep_files": 30,
+        "keep_latest_files": True,
+        "delete_python_cache": True,
+        "delete_comparison_dirs": True,
+    },
 }
 
 

@@ -27,6 +27,7 @@ cache/
 output/
 etf_output/
 fund_output/
+cleanup_output/
 trade_output/
 position_output/
 backtest_output/

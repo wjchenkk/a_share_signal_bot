@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-mkdir -p output backtest_output position_output etf_output fund_output
+mkdir -p output backtest_output position_output etf_output fund_output cleanup_output
 
 ACCOUNT="${ACCOUNT:-200000}"
 ETF_POOL="${ETF_POOL:-etf_pool.csv}"
@@ -23,6 +23,38 @@ ensure_etf_pool() {
     exit 1
   fi
 }
+
+if printf '%s' "$msg" | grep -Eq '(清理空间|释放空间|磁盘清理|清理缓存|删除冗余|删除过期|空间清理|cleanup|clean space|disk cleanup)'; then
+  cmd=(python space_cleanup.py --config config.example.yml --out cleanup_output)
+  if printf '%s' "$msg" | grep -Eq '(预览|演练|dry[- ]?run|只看|看看)'; then
+    cmd+=(--dry-run)
+  fi
+  if printf '%s' "$msg" | grep -Eq '(深度|彻底|强力|aggressive)'; then
+    cmd+=(--aggressive)
+  fi
+  if [ -n "${CLEANUP_OUTPUT_RETENTION_DAYS:-}" ]; then
+    cmd+=(--output-retention-days "$CLEANUP_OUTPUT_RETENTION_DAYS")
+  fi
+  if [ -n "${CLEANUP_CACHE_RETENTION_DAYS:-}" ]; then
+    cmd+=(--cache-retention-days "$CLEANUP_CACHE_RETENTION_DAYS")
+  fi
+  if [ -n "${CLEANUP_BACKUP_RETENTION_DAYS:-}" ]; then
+    cmd+=(--backup-retention-days "$CLEANUP_BACKUP_RETENTION_DAYS")
+  fi
+  if [ "${CLEANUP_DRY_RUN:-0}" = "1" ]; then
+    cmd+=(--dry-run)
+  fi
+  if [ "${CLEANUP_AGGRESSIVE:-0}" = "1" ]; then
+    cmd+=(--aggressive)
+  fi
+  if ! "${cmd[@]}" > cleanup_output/last_space_cleanup_chat_run.log 2>&1; then
+    echo "空间清理执行失败："
+    tail -120 cleanup_output/last_space_cleanup_chat_run.log || true
+    exit 1
+  fi
+  cat cleanup_output/latest_space_cleanup_message.txt
+  exit 0
+fi
 
 # ETF 建池：只生成 etf_pool.csv 和 etf_output/latest_etf_pool_*，不读写个股池。
 if printf '%s' "$msg" | grep -Eq 'ETF.*(建池|构建.*池|生成.*池|更新.*池)|etf.*(建池|构建.*池|生成.*池|更新.*池)'; then

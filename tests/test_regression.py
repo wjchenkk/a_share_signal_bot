@@ -24,6 +24,7 @@ from a_share_signal_bot import etf_strategy
 from a_share_signal_bot import etf_rotation
 from a_share_signal_bot import etf_pool
 from a_share_signal_bot import fund_dca
+from a_share_signal_bot import space_cleanup
 from a_share_signal_bot import position_monitor
 from a_share_signal_bot import trade_manager
 import a_share_signal_bot.scanner as scanner
@@ -1101,6 +1102,70 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertFalse((out_dir / "latest_signals.csv").exists())
             self.assertIn("基金定投计划", report_path.read_text(encoding="utf-8"))
 
+    def test_space_cleanup_deletes_only_safe_generated_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            now_ts = time.time()
+            output = root / "output"
+            cache = root / "cache" / "fund_dca"
+            backups = root / "pool_backups"
+            pycache = root / "a_share_signal_bot" / "__pycache__"
+            venv_cache = root / ".venv" / "lib" / "__pycache__"
+            compare_dir = root / "backtest_compare_current"
+            for path in [output, cache, backups, pycache, venv_cache, compare_dir]:
+                path.mkdir(parents=True)
+            latest = output / "latest_signals.csv"
+            recent = output / "signals_recent.csv"
+            old = output / "signals_old.csv"
+            old_cache = cache / "fund_rank_股票型_20240101.csv"
+            old_backup = backups / "stock_pool_20240101.csv"
+            protected = root / "stock_pool.csv"
+            for path in [latest, recent, old, old_cache, old_backup, protected, pycache / "x.pyc", venv_cache / "x.pyc", compare_dir / "x.csv"]:
+                path.write_text("x" * 10, encoding="utf-8")
+            old_ts = now_ts - 40 * 86400
+            for path in [old, old_cache, old_backup, compare_dir / "x.csv", compare_dir]:
+                os.utime(path, (old_ts, old_ts))
+
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["space_cleanup"] = {
+                "output_dirs": ["output"],
+                "cache_dirs": ["cache/fund_dca"],
+                "backup_dirs": ["pool_backups"],
+                "comparison_dir_globs": ["backtest_compare_*"],
+                "output_retention_days": 14,
+                "cache_retention_days": 14,
+                "backup_retention_days": 14,
+                "comparison_retention_days": 0,
+                "max_history_files_per_dir": 300,
+                "backup_keep_files": 30,
+                "keep_latest_files": True,
+                "delete_python_cache": True,
+                "delete_comparison_dirs": True,
+            }
+            preview = space_cleanup.collect_space_cleanup_candidates(root, cfg, now_ts=now_ts)
+            preview_paths = {p.path for p in preview}
+            self.assertIn(old.resolve(), preview_paths)
+            self.assertIn(old_cache.resolve(), preview_paths)
+            self.assertIn(old_backup.resolve(), preview_paths)
+            self.assertIn(pycache.resolve(), preview_paths)
+            self.assertIn(compare_dir.resolve(), preview_paths)
+            self.assertNotIn(latest.resolve(), preview_paths)
+            self.assertNotIn(recent.resolve(), preview_paths)
+            self.assertNotIn(protected.resolve(), preview_paths)
+            self.assertNotIn(venv_cache.resolve(), preview_paths)
+
+            result = space_cleanup.run_space_cleanup(cfg, root=root, out_dir="cleanup_output")
+            self.assertFalse(old.exists())
+            self.assertFalse(old_cache.exists())
+            self.assertFalse(old_backup.exists())
+            self.assertFalse(pycache.exists())
+            self.assertFalse(compare_dir.exists())
+            self.assertTrue(latest.exists())
+            self.assertTrue(recent.exists())
+            self.assertTrue(protected.exists())
+            self.assertTrue(venv_cache.exists())
+            self.assertTrue(result.report_path.exists())
+
     def test_etf_rank_pct_direction_matches_score_semantics(self) -> None:
         values = pd.Series([0.10, 0.20, 0.30], index=["weak", "mid", "strong"])
         high_scores = etf_rotation._rank_pct(values, higher_is_better=True)
@@ -1587,12 +1652,15 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertIn("etf_strategy.py", script)
         self.assertIn("etf_rotation.py", script)
         self.assertIn("fund_dca.py", script)
+        self.assertIn("space_cleanup.py", script)
         self.assertIn("ETF_POOL", script)
         self.assertIn("FUND_DCA_BUDGET", script)
         etf_pool_pos = script.index("last_etf_pool_chat_run.log")
         etf_backtest_pos = script.index("last_etf_rotation_backtest_chat_run.log")
         fund_dca_pos = script.index("last_fund_dca_chat_run.log")
+        cleanup_pos = script.index("last_space_cleanup_chat_run.log")
         stock_backtest_pos = script.index("python backtest.py")
+        self.assertLess(cleanup_pos, etf_pool_pos)
         self.assertLess(etf_pool_pos, etf_backtest_pos)
         self.assertLess(etf_backtest_pos, stock_backtest_pos)
         self.assertLess(fund_dca_pos, stock_backtest_pos)

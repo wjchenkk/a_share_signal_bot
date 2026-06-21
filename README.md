@@ -13,6 +13,7 @@
 - 基金定投：筛选开放式基金，输出月度预算、定投周期、执行日和每期金额。
 - 持仓管理：通过对话维护 `portfolio.csv`，支持查看、添加、修改、删除、清空和导入。
 - 交易生命周期：从买入信号生成 T+1 买入计划，并给出止损、止盈、趋势退出和加仓建议。
+- 空间清理：清理过期输出、缓存、备份、临时对比目录和 Python 缓存。
 - 对话入口：`stockbot_chat.sh` 支持个股、ETF、基金定投、持仓和交易计划相关指令。
 
 顶层脚本保留为兼容入口；业务实现已经拆到 `a_share_signal_bot/` 包内。模块职责和回归测试入口见 [docs/architecture.md](docs/architecture.md)。
@@ -329,6 +330,43 @@ trade_output/latest_trade_actions.csv        结构化操作清单
 trade_state.csv                              交易计划状态
 ```
 
+## 空间清理
+
+清理器只处理已知生成文件：`output`、`backtest_output`、`etf_output`、`fund_output`、`position_output`、`trade_output`、`cache` 下的策略缓存、备份目录、临时对比目录和 Python 缓存。不会删除源码、配置、股票池、ETF 池、持仓文件、`.git` 或 `.venv`。
+
+标准清理：
+
+```bash
+python space_cleanup.py --config config.example.yml --out cleanup_output
+```
+
+预览清理，不实际删除：
+
+```bash
+python space_cleanup.py --config config.example.yml --out cleanup_output --dry-run
+```
+
+深度清理会删除更多历史输出和缓存，仍会保留 `latest_*` / `last_*` 最新结果：
+
+```bash
+python space_cleanup.py --config config.example.yml --out cleanup_output --aggressive
+```
+
+通过对话入口：
+
+```bash
+printf '%s\n' '清理空间' | ./stockbot_chat.sh
+printf '%s\n' '预览清理空间' | ./stockbot_chat.sh
+printf '%s\n' '深度清理空间' | ./stockbot_chat.sh
+```
+
+主要输出：
+
+```text
+cleanup_output/latest_space_cleanup_message.txt  清理摘要
+cleanup_output/latest_space_cleanup_report.md    清理明细
+```
+
 ## 对话入口
 
 `stockbot_chat.sh` 会按消息内容路由到对应脚本。常用示例：
@@ -341,6 +379,7 @@ printf '%s\n' 'ETF轮动配置' | ETF_POOL=etf_pool.csv ACCOUNT=200000 ./stockbo
 printf '%s\n' '基金定投计划' | FUND_DCA_BUDGET=5000 ./stockbot_chat.sh
 printf '%s\n' '查看持仓' | ./stockbot_chat.sh
 printf '%s\n' '我的持仓后续怎么办' | ./stockbot_chat.sh
+printf '%s\n' '清理空间' | ./stockbot_chat.sh
 ```
 
 ## 数据可靠性
