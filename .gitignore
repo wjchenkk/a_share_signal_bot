@@ -25,6 +25,7 @@ sector_map.csv
 # Market data caches and generated output
 cache/
 output/
+etf_output/
 trade_output/
 position_output/
 backtest_output/

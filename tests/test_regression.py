@@ -408,6 +408,14 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertFalse(candidates.loc[candidates["code"].eq("511990"), "eligible"].iloc[0])
         self.assertTrue(selected["category"].astype(str).str.contains("/").all())
 
+    def test_etf_asset_class_and_theme_avoid_broad_misclassification(self) -> None:
+        self.assertEqual(etf_rotation.classify_asset_class("科创芯片ETF嘉实", ""), "sector")
+        self.assertEqual(etf_rotation.classify_asset_class("科创50ETF华夏", ""), "broad")
+        self.assertEqual(etf_rotation.classify_asset_class("香港证券ETF易方达", ""), "cross_border")
+        self.assertEqual(etf_rotation.classify_asset_class("中概互联网ETF易方达", ""), "cross_border")
+        self.assertEqual(etf_pool.theme_from_name("科创50ETF华夏", "broad"), "科创50")
+        self.assertEqual(etf_pool.theme_from_name("上证50ETF华夏", "broad"), "上证50")
+
     def test_build_etf_pool_writes_independent_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

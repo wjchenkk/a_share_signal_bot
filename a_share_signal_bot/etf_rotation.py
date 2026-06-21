@@ -13,9 +13,11 @@ def classify_asset_class(name: Any, category: Any) -> str:
         return "defensive"
     if any(k in cn_text for k in ["黄金", "商品", "原油", "豆粕", "有色"]):
         return "commodity"
-    if any(k in cn_text for k in ["纳指", "标普", "恒生", "港股", "日经", "海外", "QDII"]) or "qdii" in text:
+    if any(k in cn_text for k in ["纳指", "标普", "恒生", "港股", "香港", "中概", "中国互联", "日经", "亚太", "韩国", "中韩", "印度", "德国", "法国", "美国", "海外", "全球", "QDII"]) or "qdii" in text:
         return "cross_border"
-    if any(k in cn_text for k in ["沪深", "中证", "创业板", "科创", "上证", "深证", "A500", "宽基"]):
+    if any(k in cn_text for k in ["证券", "券商", "银行", "保险", "白酒", "消费", "医药", "医疗", "创新药", "生物", "半导体", "芯片", "通信", "人工智能", "计算机", "软件", "新能源", "光伏", "军工", "传媒", "游戏", "电力", "电网", "煤炭", "钢铁", "房地产", "机器人", "卫星", "化工", "设备"]):
+        return "sector"
+    if any(k in cn_text for k in ["沪深300", "中证A500", "中证500", "中证1000", "上证50", "创业板ETF", "创业板50", "科创50", "科创板50", "深证100", "A500", "宽基"]):
         return "broad"
     return "sector"
 
