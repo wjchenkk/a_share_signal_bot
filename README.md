@@ -291,6 +291,9 @@ OpenClaw/小龙虾对话入口：
 printf '%s\n' '生成买入信号' | ./stockbot_chat.sh
 printf '%s\n' '解释今天为什么没有信号' | ./stockbot_chat.sh
 printf '%s\n' '为什么没买 600519' | ./stockbot_chat.sh
+printf '%s\n' '生成ETF信号' | ./stockbot_chat.sh
+printf '%s\n' 'ETF轮动配置' | ./stockbot_chat.sh
+printf '%s\n' 'ETF轮动回测' | ./stockbot_chat.sh
 ```
 
 定时任务脚本：
@@ -362,6 +365,20 @@ python etf_rotation.py --mode rotate --pool etf_pool.csv --config config.example
 
 # 回测最近3年，每周五再平衡
 python etf_rotation.py --mode backtest --pool etf_pool.csv --config config.example.yml --out etf_output --account 200000 --years 3 --rebalance W-FRI
+```
+
+也可以通过小龙虾入口触发：
+
+```bash
+printf '%s\n' '生成ETF信号' | ./stockbot_chat.sh
+printf '%s\n' 'ETF轮动配置' | ./stockbot_chat.sh
+printf '%s\n' 'ETF轮动回测' | ./stockbot_chat.sh
+```
+
+默认读取 `etf_pool.csv`；也可以通过环境变量指定：
+
+```bash
+printf '%s\n' 'ETF轮动配置' | ETF_POOL=/path/to/etf_pool.csv ACCOUNT=200000 ./stockbot_chat.sh
 ```
 
 轮动策略会按全ETF池横截面排序，而不是只判断单只ETF是否出现买点。主要因子包括：

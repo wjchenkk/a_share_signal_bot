@@ -520,6 +520,15 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(action.kind, "add")
         self.assertEqual(action.items[0][0], "600519")
 
+    def test_stockbot_chat_routes_etf_before_stock_backtest(self) -> None:
+        script = (ROOT / "stockbot_chat.sh").read_text(encoding="utf-8")
+        self.assertIn("etf_strategy.py", script)
+        self.assertIn("etf_rotation.py", script)
+        self.assertIn("ETF_POOL", script)
+        etf_backtest_pos = script.index("last_etf_rotation_backtest_chat_run.log")
+        stock_backtest_pos = script.index("python backtest.py")
+        self.assertLess(etf_backtest_pos, stock_backtest_pos)
+
     def test_golden_master_full_scan_matches_backup_main(self) -> None:
         self.assertTrue(OLD_MAIN_PATH.exists(), f"缺少旧版源码备份: {OLD_MAIN_PATH}")
         old = load_old_main_module()

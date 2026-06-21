@@ -2,9 +2,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-mkdir -p output backtest_output position_output
+mkdir -p output backtest_output position_output etf_output
 
 ACCOUNT="${ACCOUNT:-200000}"
+ETF_POOL="${ETF_POOL:-etf_pool.csv}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
@@ -12,6 +13,69 @@ cat > "$tmp"
 
 source .venv/bin/activate
 msg="$(cat "$tmp")"
+
+ensure_etf_pool() {
+  if [ ! -f "$ETF_POOL" ]; then
+    echo "ETF池文件不存在：$ETF_POOL"
+    echo "可先执行：cp etf_pool_sample.csv etf_pool.csv，或设置 ETF_POOL=/path/to/etf_pool.csv"
+    exit 1
+  fi
+}
+
+# ETF 轮动回测必须优先于普通个股回测，否则“ETF回测”会被普通回测规则截获。
+if printf '%s' "$msg" | grep -Eq 'ETF.*(回测|模拟|backtest|Backtest)|etf.*(回测|模拟|backtest)'; then
+  ensure_etf_pool
+  if ! python etf_rotation.py \
+    --mode backtest \
+    --pool "$ETF_POOL" \
+    --config config.example.yml \
+    --out etf_output \
+    --account "$ACCOUNT" \
+    --years "${ETF_BACKTEST_YEARS:-3}" \
+    --rebalance "${ETF_REBALANCE:-W-FRI}" \
+    > etf_output/last_etf_rotation_backtest_chat_run.log 2>&1; then
+    echo "ETF轮动回测执行失败："
+    tail -120 etf_output/last_etf_rotation_backtest_chat_run.log || true
+    exit 1
+  fi
+  cat etf_output/latest_etf_rotation_backtest_report.md
+  exit 0
+fi
+
+# ETF 轮动配置：按全ETF池排序，输出当期组合。
+if printf '%s' "$msg" | grep -Eq 'ETF.*(轮动|配置|组合|资产配置|调仓)|etf.*(轮动|配置|组合|资产配置|调仓)'; then
+  ensure_etf_pool
+  if ! python etf_rotation.py \
+    --mode rotate \
+    --pool "$ETF_POOL" \
+    --config config.example.yml \
+    --out etf_output \
+    --account "$ACCOUNT" \
+    > etf_output/last_etf_rotation_chat_run.log 2>&1; then
+    echo "ETF轮动配置执行失败："
+    tail -120 etf_output/last_etf_rotation_chat_run.log || true
+    exit 1
+  fi
+  cat etf_output/latest_etf_rotation_message.txt
+  exit 0
+fi
+
+# ETF 买点/信号扫描：单ETF趋势买点，不走个股股票池。
+if printf '%s' "$msg" | grep -Eq 'ETF.*(信号|买点|扫描|策略)|etf.*(信号|买点|扫描|策略)'; then
+  ensure_etf_pool
+  if ! python etf_strategy.py \
+    --pool "$ETF_POOL" \
+    --config config.example.yml \
+    --out etf_output \
+    --account "$ACCOUNT" \
+    > etf_output/last_etf_strategy_chat_run.log 2>&1; then
+    echo "ETF信号扫描执行失败："
+    tail -120 etf_output/last_etf_strategy_chat_run.log || true
+    exit 1
+  fi
+  cat etf_output/latest_etf_message.txt
+  exit 0
+fi
 
 if printf '%s' "$msg" | grep -Eq '回测|模拟交易|模拟账户|近两年|backtest|Backtest'; then
   if ! python backtest.py \
