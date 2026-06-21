@@ -20,6 +20,8 @@ from a_share_signal_bot import base as bot_base
 from a_share_signal_bot import etf_strategy
 from a_share_signal_bot import etf_rotation
 from a_share_signal_bot import etf_pool
+from a_share_signal_bot import position_monitor
+from a_share_signal_bot import trade_manager
 import a_share_signal_bot.scanner as scanner
 
 
@@ -328,6 +330,45 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(pd.Timestamp(out.iloc[-1]["date"]).strftime("%Y-%m-%d"), "2026-06-19")
         self.assertAlmostEqual(float(out.iloc[-1]["close"]), latest)
 
+    def test_position_monitor_ignores_stale_minute_window(self) -> None:
+        stale_minutes = pd.DataFrame(
+            [
+                {"datetime": "2026-06-18 14:50:00", "close": 10.0},
+                {"datetime": "2026-06-18 14:55:00", "close": 10.1},
+            ]
+        )
+        today_window, note = position_monitor.minute_window_for_today(stale_minutes, pd.Timestamp("2026-06-21 10:00"))
+        self.assertTrue(today_window.empty)
+        self.assertIn("未使用历史分钟K", note)
+
+        fresh_minutes = pd.concat(
+            [
+                stale_minutes,
+                pd.DataFrame([{"datetime": "2026-06-21 10:00:00", "close": 10.2}]),
+            ],
+            ignore_index=True,
+        )
+        today_window, note = position_monitor.minute_window_for_today(fresh_minutes, pd.Timestamp("2026-06-21 10:00"))
+        self.assertEqual(len(today_window), 1)
+        self.assertEqual(note, "")
+
+    def test_trade_manager_expires_stale_pending_buys(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg.setdefault("trade_lifecycle", {})["pending_buy_expire_days"] = 5
+        state = pd.DataFrame(
+            [
+                {"code": "600001", "name": "过期计划", "status": "PENDING_BUY", "signal_date": "2026-06-15", "shares": 100, "last_price": 10.0},
+                {"code": "600002", "name": "未过期计划", "status": "PENDING_BUY", "signal_date": "2026-06-18", "shares": 100, "last_price": 10.0},
+                {"code": "600003", "name": "持仓", "status": "ACTIVE", "signal_date": "2026-06-01", "shares": 100, "last_price": 10.0},
+            ]
+        )
+        out, actions = trade_manager.expire_stale_pending_buys(state, cfg, pd.Timestamp("2026-06-21"))
+        by_code = out.set_index("code")
+        self.assertEqual(by_code.loc["600001", "status"], "EXPIRED")
+        self.assertEqual(by_code.loc["600002", "status"], "PENDING_BUY")
+        self.assertEqual(by_code.loc["600003", "status"], "ACTIVE")
+        self.assertEqual(actions["action"].tolist(), ["EXPIRE_PENDING_BUY"])
+
     def test_trading_pool_can_require_local_history(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -585,6 +626,16 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertEqual(pool_path.read_text(encoding="utf-8-sig"), original)
             self.assertTrue((root / "etf_out" / "latest_etf_pool_report.md").exists())
             self.assertTrue((root / "etf_out" / "latest_etf_pool_errors.csv").exists())
+
+    def test_etf_rank_pct_direction_matches_score_semantics(self) -> None:
+        values = pd.Series([0.10, 0.20, 0.30], index=["weak", "mid", "strong"])
+        high_scores = etf_rotation._rank_pct(values, higher_is_better=True)
+        self.assertGreater(float(high_scores["strong"]), float(high_scores["mid"]))
+        self.assertGreater(float(high_scores["mid"]), float(high_scores["weak"]))
+
+        low_scores = etf_rotation._rank_pct(values, higher_is_better=False)
+        self.assertGreater(float(low_scores["weak"]), float(low_scores["mid"]))
+        self.assertGreater(float(low_scores["mid"]), float(low_scores["strong"]))
 
     def test_etf_rotation_selects_with_category_caps(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)

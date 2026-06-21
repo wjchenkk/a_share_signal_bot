@@ -205,6 +205,63 @@ def is_t1_locked(entry_date: Any, current_date: Optional[pd.Timestamp] = None) -
     return bool(ed >= pd.Timestamp(cd).normalize())
 
 
+def expire_stale_pending_buys(
+    state: pd.DataFrame,
+    cfg: Dict[str, Any],
+    current_date: Optional[pd.Timestamp] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """过期长时间未从持仓文件确认成交的 PENDING_BUY 计划。"""
+    state = ensure_state(state)
+    if state.empty:
+        return state, pd.DataFrame(columns=ACTION_COLUMNS)
+    max_age_days = int(cfg.get("trade_lifecycle", {}).get("pending_buy_expire_days", 5) or 0)
+    if max_age_days <= 0:
+        return state, pd.DataFrame(columns=ACTION_COLUMNS)
+    cd = pd.Timestamp(current_date or today_str()).normalize()
+    actions: List[Dict[str, Any]] = []
+    pending_mask = state["status"].astype(str).eq("PENDING_BUY")
+    for idx, row in state[pending_mask].iterrows():
+        sd = parse_date(row.get("signal_date"))
+        if sd is None:
+            sd = parse_date(row.get("updated_at"))
+        if sd is None:
+            age_days = max_age_days + 1
+            signal_text = "未知日期"
+        else:
+            age_days = (cd - pd.Timestamp(sd).normalize()).days
+            signal_text = pd.Timestamp(sd).strftime("%Y-%m-%d")
+        if age_days <= max_age_days:
+            continue
+        code = normalize_code(row.get("code"))
+        reason = f"买入信号日期{signal_text}，已超过{max_age_days}天仍未从持仓文件确认成交，自动过期"
+        state.loc[idx, "status"] = "EXPIRED"
+        state.loc[idx, "notes"] = reason
+        state.loc[idx, "updated_at"] = now_cn().strftime("%Y-%m-%d %H:%M:%S")
+        actions.append({
+            "date": now_cn().strftime("%Y-%m-%d %H:%M"),
+            "code": code,
+            "name": str(row.get("name", "")),
+            "action": "EXPIRE_PENDING_BUY",
+            "action_cn": "买入计划过期",
+            "trade_shares": 0,
+            "price_ref": safe_float(row.get("last_price")),
+            "price_range": "",
+            "order_timing": "不交易",
+            "reason": reason,
+            "entry_date": str(row.get("entry_date", "")),
+            "entry_price": safe_float(row.get("entry_price")),
+            "shares": int(safe_float(row.get("shares"), 0)),
+            "stop_loss": safe_float(row.get("stop_loss")),
+            "take_profit_1": safe_float(row.get("take_profit_1")),
+            "take_profit_2": safe_float(row.get("take_profit_2")),
+            "tp1_done": bool(row.get("tp1_done", False)),
+            "setup_type": str(row.get("setup_type", "")),
+            "score": safe_float(row.get("score")),
+            "status": "EXPIRED",
+        })
+    return ensure_state(state), pd.DataFrame(actions, columns=ACTION_COLUMNS)
+
+
 def infer_stop_targets(hist: pd.DataFrame, entry_price: float, cfg: Dict[str, Any]) -> Tuple[float, float, float]:
     """没有系统买入信号时，按主策略止损逻辑推断止损和 R 倍止盈。"""
     if hist is None or hist.empty or not np.isfinite(entry_price) or entry_price <= 0:
@@ -678,13 +735,17 @@ def run(args: argparse.Namespace) -> Tuple[pd.DataFrame, str, Path]:
         args.mode = "intraday"
     all_actions: List[pd.DataFrame] = []
     sync_notes: List[str] = []
+    if action in {"sync", "advise", "all"} or args.sync:
+        state, notes = sync_with_portfolio(state, portfolio_path, cfg, fetcher, signals, args.account)
+        sync_notes.extend(notes)
+    state, expired_actions = expire_stale_pending_buys(state, cfg)
+    if not expired_actions.empty:
+        all_actions.append(expired_actions)
+        sync_notes.append(f"已自动过期 {len(expired_actions)} 条超时未成交的买入计划。")
     if action in {"from_signals", "all"}:
         state, buy_actions = create_pending_from_signals(state, signals)
         if not buy_actions.empty:
             all_actions.append(buy_actions)
-    if action in {"sync", "advise", "all"} or args.sync:
-        state, notes = sync_with_portfolio(state, portfolio_path, cfg, fetcher, signals, args.account)
-        sync_notes.extend(notes)
     need_market = action in {"advise", "all", "sync"}
     market = bot.evaluate_market(fetcher, cfg) if need_market else None
     try:

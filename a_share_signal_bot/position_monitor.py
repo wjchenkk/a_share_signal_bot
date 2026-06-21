@@ -179,6 +179,23 @@ def fetch_minute(code: str, cfg: Dict[str, Any], period: str = "5", spot_all: Op
             return out
     raise RuntimeError("分钟K线获取失败：" + " | ".join(errors))
 
+
+def minute_window_for_today(mdf: pd.DataFrame, current_date: Optional[datetime] = None) -> Tuple[pd.DataFrame, str]:
+    if mdf is None or mdf.empty or "datetime" not in mdf.columns:
+        return pd.DataFrame(), "分钟K缺失"
+    out = mdf.copy()
+    out["datetime"] = pd.to_datetime(out["datetime"], errors="coerce")
+    out = out.dropna(subset=["datetime"])
+    if out.empty:
+        return pd.DataFrame(), "分钟K缺失"
+    today = (current_date or bot.now_cn()).date()
+    today_df = out[out["datetime"].dt.date == today].copy()
+    if today_df.empty:
+        latest = out["datetime"].max()
+        latest_text = pd.Timestamp(latest).strftime("%Y-%m-%d") if pd.notna(latest) else "未知日期"
+        return pd.DataFrame(), f"当日分钟K缺失（最新{latest_text}），未使用历史分钟K"
+    return today_df.reset_index(drop=True), ""
+
 def current_spot_row(spot: pd.DataFrame, code: str) -> Dict[str, float]:
     if spot is None or spot.empty or "代码" not in spot.columns:
         return {}
@@ -270,18 +287,18 @@ def analyze_position(
     try:
         mdf = fetch_minute(code, cfg, period=str(pm.get("minute_period", "5")), spot_all=spot_all)
         if not mdf.empty:
-            today = bot.now_cn().date()
-            mdf_today = mdf[mdf["datetime"].dt.date == today].copy()
+            mdf_today, minute_warning = minute_window_for_today(mdf)
             if mdf_today.empty:
-                mdf_today = mdf.tail(60).copy()
-            if "amount" in mdf_today.columns and "volume" in mdf_today.columns and pd.to_numeric(mdf_today["volume"], errors="coerce").sum() > 0:
-                intraday_vwap = float(pd.to_numeric(mdf_today["amount"], errors="coerce").sum() / (pd.to_numeric(mdf_today["volume"], errors="coerce").sum() * 100))
+                intraday_note = minute_warning
             else:
-                intraday_vwap = float(pd.to_numeric(mdf_today["close"], errors="coerce").mean())
-            minute_ma = float(pd.to_numeric(mdf_today["close"], errors="coerce").rolling(6, min_periods=2).mean().iloc[-1])
-            intraday_high = float(pd.to_numeric(mdf_today["high"] if "high" in mdf_today.columns else mdf_today["close"], errors="coerce").max())
-            intraday_low = float(pd.to_numeric(mdf_today["low"] if "low" in mdf_today.columns else mdf_today["close"], errors="coerce").min())
-            intraday_note = f"VWAP {intraday_vwap:.2f}，分钟均线 {minute_ma:.2f}，源={mdf.attrs.get("minute_provider", "unknown")}"
+                if "amount" in mdf_today.columns and "volume" in mdf_today.columns and pd.to_numeric(mdf_today["volume"], errors="coerce").sum() > 0:
+                    intraday_vwap = float(pd.to_numeric(mdf_today["amount"], errors="coerce").sum() / (pd.to_numeric(mdf_today["volume"], errors="coerce").sum() * 100))
+                else:
+                    intraday_vwap = float(pd.to_numeric(mdf_today["close"], errors="coerce").mean())
+                minute_ma = float(pd.to_numeric(mdf_today["close"], errors="coerce").rolling(6, min_periods=2).mean().iloc[-1])
+                intraday_high = float(pd.to_numeric(mdf_today["high"] if "high" in mdf_today.columns else mdf_today["close"], errors="coerce").max())
+                intraday_low = float(pd.to_numeric(mdf_today["low"] if "low" in mdf_today.columns else mdf_today["close"], errors="coerce").min())
+                intraday_note = f"VWAP {intraday_vwap:.2f}，分钟均线 {minute_ma:.2f}，源={mdf.attrs.get('minute_provider', 'unknown')}"
     except Exception as exc:
         intraday_note = f"分钟K失败：{str(exc)[:80]}"
 

@@ -305,6 +305,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "benchmark_code": "510300"
         },
     },
+    "trade_lifecycle": {
+        "state_path": "trade_state.csv",
+        "out_dir": "trade_output",
+        "max_hold_days": 60,
+        "pending_buy_expire_days": 5,
+        "intraday_stop_take_profit": True,
+        "close_confirm_trend_exit": True,
+        "allow_add": True,
+        "add_max_position_pct": 0.18,
+        "add_step_pct": 0.25,
+        "min_trade_lot": 100,
+    },
     "position_monitor": {
         "portfolio_path": "portfolio.csv",
         "out_dir": "position_output",

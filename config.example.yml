@@ -249,6 +249,7 @@ trade_lifecycle:
   state_path: "trade_state.csv"
   out_dir: "trade_output"
   max_hold_days: 60
+  pending_buy_expire_days: 5
   # 盘中允许按止损/1.5R/3R提示交易；MA20/MA60/大盘弱势只在收盘确认后提示次日开盘卖。
   intraday_stop_take_profit: true
   close_confirm_trend_exit: true

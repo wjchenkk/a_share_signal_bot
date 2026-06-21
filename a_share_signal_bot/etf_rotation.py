@@ -30,7 +30,7 @@ def _rank_pct(values: pd.Series, higher_is_better: bool = True) -> pd.Series:
     s = pd.to_numeric(values, errors="coerce")
     if s.notna().sum() <= 1:
         return pd.Series(0.5, index=values.index)
-    ranked = s.rank(pct=True, ascending=not higher_is_better)
+    ranked = s.rank(pct=True, ascending=higher_is_better)
     return ranked.fillna(0.5)
 
 
