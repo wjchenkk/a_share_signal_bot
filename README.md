@@ -310,6 +310,9 @@ python hot_pool.py --mode cache --pool stock_pool.csv --top 100
 # 次日盘前生成交易池；核心池优先，热榜补位，默认最多150只且只保留沪深主板
 python hot_pool.py --mode build --pool stock_pool.csv --max-size 150
 
+# 网络不稳定或只想扫描本地可用数据时，只补入已有历史K缓存的热榜股
+python hot_pool.py --mode build --pool stock_pool.csv --max-size 150 --require-local-history
+
 # 收盘后一条命令完成：缓存今天热榜，并生成下一工作日交易池
 python hot_pool.py --mode all --pool stock_pool.csv --max-size 150
 ```
@@ -321,6 +324,11 @@ cache/hot_pool/hot_rank_YYYYMMDD.csv  当天热榜缓存
 output/latest_trading_pool.csv        次日扫描用交易池
 output/latest_hot_pool_top100.csv     最新热榜Top100
 ```
+
+交易池构建默认会优先选择已有本地历史 K 线缓存的热榜股；加 `--require-local-history`
+会严格排除无缓存热榜股，适合网络不可用时避免扫描阶段大量数据失败。扫描阶段遇到
+DNS/超时类网络错误时，会快速回退本地旧缓存；自动板块映射也会使用旧缓存兜底，避免
+冷缓存时先全市场反查板块。
 
 ## 7. 输出文件
 

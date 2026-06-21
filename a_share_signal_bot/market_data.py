@@ -13,6 +13,8 @@ class AkshareFetcher:
         self.request_retries = int(cfg["data"].get("request_retries", 3))
         self.retry_backoff_seconds = list(cfg["data"].get("retry_backoff_seconds", [1.5, 4.0, 8.0]))
         self.allow_stale_cache_on_error = bool(cfg["data"].get("allow_stale_cache_on_error", True))
+        self.use_stale_cache_on_network_error = bool(cfg["data"].get("use_stale_cache_on_network_error", True))
+        self.fail_fast_network_errors = bool(cfg["data"].get("fail_fast_network_errors", True))
         self.stock_providers = provider_list(cfg, "hist_providers", ["tencent", "sina", "eastmoney"])
         self.index_providers = provider_list(cfg, "index_providers", ["tencent", "eastmoney", "legacy"])
         self._spot_cache: Optional[pd.DataFrame] = None
@@ -22,6 +24,7 @@ class AkshareFetcher:
         self._board_hist_cache: Dict[Tuple[str, str, str, str, str], pd.DataFrame] = {}
         self._active_pool_codes_cache: Optional[List[str]] = None
         self._ths_concept_hist_symbol_cache: Optional[Tuple[set, Dict[str, str]]] = None
+        self._network_error_seen = False
 
     def _read_cache(self, path: Path, ignore_freshness: bool = False) -> Optional[pd.DataFrame]:
         if path.exists() and (ignore_freshness or ((not self.refresh) and is_cache_fresh(path, self.cache_hours))):
@@ -37,6 +40,33 @@ class AkshareFetcher:
         except Exception:
             pass
 
+    def _is_network_error(self, exc: Exception) -> bool:
+        text = repr(exc)
+        markers = [
+            "NameResolutionError",
+            "Failed to resolve",
+            "Name or service not known",
+            "Temporary failure in name resolution",
+            "getaddrinfo failed",
+            "nodename nor servname",
+            "Network is unreachable",
+            "Connection refused",
+            "ConnectionError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "Read timed out",
+            "timed out",
+            "Max retries exceeded",
+            "ProxyError",
+        ]
+        return any(m in text for m in markers)
+
+    def _mark_network_error(self, exc: Exception) -> bool:
+        is_network_error = self._is_network_error(exc)
+        if is_network_error:
+            self._network_error_seen = True
+        return is_network_error
+
     def _with_retry(self, label: str, func) -> pd.DataFrame:
         last_exc: Optional[Exception] = None
         attempts = max(1, self.request_retries)
@@ -48,6 +78,8 @@ class AkshareFetcher:
                 return df
             except Exception as exc:
                 last_exc = exc
+                if self.fail_fast_network_errors and self._mark_network_error(exc):
+                    raise exc
                 if attempt < attempts - 1:
                     wait = self.retry_backoff_seconds[min(attempt, len(self.retry_backoff_seconds) - 1)] if self.retry_backoff_seconds else 1.5
                     time.sleep(float(wait))
@@ -168,6 +200,11 @@ class AkshareFetcher:
     def stock_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
         code = normalize_code(code)
         errors: List[str] = []
+        stale = self._fallback_stale_cache(f"stock_*_{code}_{adjust or 'none'}_*.csv", normalize_stock_hist) if self.use_stale_cache_on_network_error else None
+        if self.fail_fast_network_errors and self._network_error_seen:
+            if stale is not None:
+                return stale
+            raise RuntimeError("已检测到网络不可用，且无本地历史K缓存")
         for provider in self.stock_providers:
             provider = provider.lower().strip()
             cache_name = f"stock_{provider}_{code}_{adjust or 'none'}_{start_date}_{end_date}.csv"
@@ -200,9 +237,13 @@ class AkshareFetcher:
                 return df
             except Exception as exc:
                 errors.append(f"{provider}: {exc}")
+                if self._mark_network_error(exc):
+                    if stale is not None:
+                        return stale
+                    if self.fail_fast_network_errors:
+                        break
                 continue
 
-        stale = self._fallback_stale_cache(f"stock_*_{code}_{adjust or 'none'}_*.csv", normalize_stock_hist)
         if stale is not None:
             return stale
         raise RuntimeError("所有个股K线数据源均失败：" + " | ".join(errors))
@@ -251,6 +292,11 @@ class AkshareFetcher:
         start_date = self.cfg["data"].get("start_date") or "20220101"
         end_date = self.cfg["data"].get("end_date") or today_yyyymmdd()
         errors: List[str] = []
+        stale = self._fallback_stale_cache(f"index_*_{symbol}_*.csv", normalize_index_hist) if self.use_stale_cache_on_network_error else None
+        if self.fail_fast_network_errors and self._network_error_seen:
+            if stale is not None:
+                return stale
+            raise RuntimeError("已检测到网络不可用，且无本地指数K缓存")
         for provider in self.index_providers:
             provider = provider.lower().strip()
             cache_name = f"index_{provider}_{symbol}_{start_date}_{end_date}.csv"
@@ -280,8 +326,12 @@ class AkshareFetcher:
                 return df
             except Exception as exc:
                 errors.append(f"{provider}: {exc}")
+                if self._mark_network_error(exc):
+                    if stale is not None:
+                        return stale
+                    if self.fail_fast_network_errors:
+                        break
                 continue
-        stale = self._fallback_stale_cache(f"index_*_{symbol}_*.csv", normalize_index_hist)
         if stale is not None:
             return stale
         raise RuntimeError("所有指数K线数据源均失败：" + " | ".join(errors))
@@ -440,6 +490,17 @@ class AkshareFetcher:
                 return cached.copy()
 
         errors: List[str] = []
+        stale = None
+        if self.use_stale_cache_on_network_error:
+            if pool_spot_mode and pool_cache_path is not None:
+                stale = self._fallback_stale_cache(pool_cache_path.name, lambda x: x)
+            if stale is None:
+                stale = self._fallback_stale_cache("spot_all.csv", lambda x: x)
+        if self.fail_fast_network_errors and self._network_error_seen:
+            if stale is not None:
+                self._spot_cache = stale
+                return stale.copy()
+            raise RuntimeError("已检测到网络不可用，且无本地实时行情缓存")
         for provider in providers:
             provider = provider.lower().strip()
             try:
@@ -463,12 +524,18 @@ class AkshareFetcher:
                 return df.copy()
             except Exception as exc:
                 errors.append(f"{provider}: {exc}")
+                if self._mark_network_error(exc):
+                    if stale is not None:
+                        self._spot_cache = stale
+                        return stale.copy()
+                    if self.fail_fast_network_errors:
+                        break
                 continue
-        stale = None
-        if pool_spot_mode and pool_cache_path is not None:
-            stale = self._fallback_stale_cache(pool_cache_path.name, lambda x: x)
         if stale is None:
-            stale = self._fallback_stale_cache("spot_all.csv", lambda x: x)
+            if pool_spot_mode and pool_cache_path is not None:
+                stale = self._fallback_stale_cache(pool_cache_path.name, lambda x: x)
+            if stale is None:
+                stale = self._fallback_stale_cache("spot_all.csv", lambda x: x)
         if stale is not None:
             self._spot_cache = stale
             return stale.copy()
@@ -625,6 +692,12 @@ class AkshareFetcher:
             df.attrs["data_provider"] = f"board_{kind}_cache"
             self._board_hist_cache[mem_key] = df.copy()
             return df
+        stale = self._fallback_stale_cache(f"board_{kind}_hist_{safe_symbol}_{adjust or 'none'}_{start_date}_*.csv", normalize_index_hist)
+        if self.fail_fast_network_errors and self._network_error_seen:
+            if stale is not None:
+                self._board_hist_cache[mem_key] = stale.copy()
+                return stale.copy()
+            raise RuntimeError("已检测到网络不可用，跳过板块日K请求")
         import akshare as ak
         try:
             if kind == "concept":
@@ -645,10 +718,9 @@ class AkshareFetcher:
                     lambda: ak.stock_board_concept_hist_em(symbol=resolved_symbol, period="daily", start_date=start_date, end_date=end_date, adjust=adjust),
                 )
         except Exception:
-            cached = self._fallback_stale_cache(f"board_{kind}_hist_{safe_symbol}_{adjust or 'none'}_{start_date}_*.csv", normalize_index_hist)
-            if cached is not None:
-                self._board_hist_cache[mem_key] = cached.copy()
-                return cached.copy()
+            if stale is not None:
+                self._board_hist_cache[mem_key] = stale.copy()
+                return stale.copy()
             raise
         time.sleep(self.sleep_seconds)
         df = normalize_index_hist(raw)
@@ -1330,6 +1402,3 @@ def evaluate_market(fetcher: AkshareFetcher, cfg: Dict[str, Any]) -> MarketState
     if note_text:
         summary += f"，盘面特征：{note_text}"
     return MarketState(date, avg_score, regime, exposure, details, summary, market_ret20, market_ret60)
-
-
-

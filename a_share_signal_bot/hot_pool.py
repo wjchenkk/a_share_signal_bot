@@ -484,6 +484,21 @@ def read_hot_rank(path: Path) -> pd.DataFrame:
     return hot[hot["code"].ne("")].copy()
 
 
+def has_local_history_cache(code: str, cache_dir: str | Path = "cache", adjust: str = "qfq") -> bool:
+    """Return true if any local historical K cache exists for code."""
+    c = normalize_hot_code(code)
+    if not c:
+        return False
+    root = Path(cache_dir)
+    adjusts = [adjust or "none"]
+    if (adjust or "none") != "none":
+        adjusts.append("none")
+    for adj in dict.fromkeys(adjusts):
+        if any(root.glob(f"stock_*_{c}_{adj}_*.csv")):
+            return True
+    return False
+
+
 def build_trading_pool(args: argparse.Namespace) -> pd.DataFrame:
     for_date = ymd(args.for_date)
     cache_dir = Path(args.cache_dir)
@@ -515,7 +530,31 @@ def build_trading_pool(args: argparse.Namespace) -> pd.DataFrame:
         slots = max_size - len(core)
         core_codes = set(core["code"].astype(str))
         hot_add = hot[~hot["code"].isin(core_codes)].copy()
-        hot_add = hot_add.sort_values(["hot_rank", "hot_score"], ascending=[True, False]).head(slots).copy()
+        history_cache_dir = getattr(args, "history_cache_dir", "cache")
+        history_adjust = getattr(args, "history_adjust", "qfq")
+        prefer_local_history = bool(getattr(args, "prefer_local_history", True))
+        require_local_history = bool(getattr(args, "require_local_history", False))
+        if prefer_local_history or require_local_history:
+            hot_add["has_local_history"] = hot_add["code"].map(
+                lambda c: has_local_history_cache(c, history_cache_dir, history_adjust)
+            )
+            if require_local_history:
+                before_history_filter = len(hot_add)
+                hot_add = hot_add[hot_add["has_local_history"]].copy()
+                excluded_history = before_history_filter - len(hot_add)
+                if excluded_history > 0:
+                    print(f"[交易池] 已排除无本地历史K缓存的热榜股 {excluded_history} 只")
+            elif "has_local_history" in hot_add.columns:
+                hot_add = hot_add.sort_values(
+                    ["has_local_history", "hot_rank", "hot_score"],
+                    ascending=[False, True, False],
+                )
+        sort_cols = ["hot_rank", "hot_score"]
+        sort_ascending = [True, False]
+        if prefer_local_history and "has_local_history" in hot_add.columns:
+            sort_cols = ["has_local_history"] + sort_cols
+            sort_ascending = [False] + sort_ascending
+        hot_add = hot_add.sort_values(sort_cols, ascending=sort_ascending).head(slots).copy()
         trading = pd.concat(
             [
                 core.assign(origin="core", hot_rank=pd.NA, hot_score=pd.NA, hot_sources=""),
@@ -562,6 +601,8 @@ def build_trading_pool(args: argparse.Namespace) -> pd.DataFrame:
         "hot_added": int((trading["origin"] == "hot").sum()),
         "trading_pool_size": int(len(trading)),
         "mainboard_only": bool(args.mainboard_only),
+        "prefer_local_history": bool(getattr(args, "prefer_local_history", True)),
+        "require_local_history": bool(getattr(args, "require_local_history", False)),
         "hot_cache": str(hot_path),
         "output": str(out_path),
     }
@@ -592,6 +633,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--sources", default="", help="逗号分隔来源白名单；默认全部")
     parser.add_argument("--mainboard-only", dest="mainboard_only", action="store_true", default=True, help="只保留沪深主板，默认开启")
     parser.add_argument("--include-non-mainboard", dest="mainboard_only", action="store_false", help="允许创业板/科创板/北交所进入交易池")
+    parser.add_argument("--history-cache-dir", default="cache", help="历史K线缓存目录，用于优先选择可扫描的热榜股")
+    parser.add_argument("--history-adjust", default="qfq", help="历史K线缓存复权口径，默认 qfq；也会兼容 none 缓存")
+    parser.add_argument("--prefer-local-history", dest="prefer_local_history", action="store_true", default=True, help="热榜补位时优先选择已有历史K缓存的股票，默认开启")
+    parser.add_argument("--no-prefer-local-history", dest="prefer_local_history", action="store_false", help="热榜补位不按本地历史K缓存排序")
+    parser.add_argument("--require-local-history", action="store_true", help="只允许已有本地历史K缓存的热榜股补入交易池；网络不可用时建议开启")
     parser.add_argument("--force", action="store_true", help="非工作日也强制缓存")
     return parser.parse_args(argv)
 

@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 import main as bot
+from a_share_signal_bot.market_data import AkshareFetcher
+from a_share_signal_bot import hot_pool
 import a_share_signal_bot.scanner as scanner
 
 
@@ -174,6 +176,71 @@ class OfflineRegressionTests(unittest.TestCase):
             written = bot.write_stock_pool(pool, out_path)
             reread = bot.read_stock_pool(str(out_path))
             pd.testing.assert_frame_equal(written, reread)
+
+    def test_stock_hist_uses_stale_cache_on_network_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["data"]["cache_dir"] = td
+            stale = deterministic_hist(10.0, 12.0, periods=220)
+            stale.to_csv(Path(td) / "stock_tencent_600519_qfq_20220101_20260619.csv", index=False)
+            fetcher = AkshareFetcher(cfg)
+            calls = []
+
+            def fail_tencent(*args, **kwargs):
+                calls.append("tencent")
+                raise RuntimeError("NameResolutionError: Failed to resolve 'web.ifzq.gtimg.cn'")
+
+            def fail_if_called(*args, **kwargs):
+                calls.append("unexpected")
+                raise AssertionError("stale cache should short-circuit other providers")
+
+            fetcher._stock_hist_tencent = fail_tencent  # type: ignore[method-assign]
+            fetcher._stock_hist_sina = fail_if_called  # type: ignore[method-assign]
+            fetcher._stock_hist_eastmoney = fail_if_called  # type: ignore[method-assign]
+            df = fetcher.stock_hist("600519", "20220101", "20260621", "qfq")
+            self.assertEqual(calls, ["tencent"])
+            self.assertEqual(df.attrs.get("data_provider"), "stale_cache")
+            self.assertGreaterEqual(len(df), 200)
+
+    def test_trading_pool_can_require_local_history(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool_path = root / "stock_pool.csv"
+            pool_path.write_text("code,name,sector\n600519,贵州茅台,白酒\n", encoding="utf-8-sig")
+            hot_dir = root / "hot"
+            hot_dir.mkdir()
+            pd.DataFrame(
+                [
+                    {"code": "000001", "name": "平安银行", "hot_rank": 1, "hot_score": 100, "sources": "x"},
+                    {"code": "000002", "name": "万科A", "hot_rank": 2, "hot_score": 90, "sources": "x"},
+                ]
+            ).to_csv(hot_dir / "hot_rank_20260619.csv", index=False, encoding="utf-8-sig")
+            history_dir = root / "cache"
+            history_dir.mkdir()
+            deterministic_hist(10.0, 12.0, periods=220).to_csv(
+                history_dir / "stock_tencent_000002_qfq_20220101_20260619.csv",
+                index=False,
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "for_date": "20260622",
+                    "cache_dir": str(hot_dir),
+                    "allow_same_day_hot": False,
+                    "hot_date": "",
+                    "mainboard_only": True,
+                    "pool": str(pool_path),
+                    "max_size": 3,
+                    "out": str(root / "out"),
+                    "history_cache_dir": str(history_dir),
+                    "history_adjust": "qfq",
+                    "prefer_local_history": True,
+                    "require_local_history": True,
+                },
+            )()
+            trading = hot_pool.build_trading_pool(args)
+            self.assertEqual(trading["code"].tolist(), ["600519", "000002"])
 
     def test_add_indicators_stable_columns(self) -> None:
         dates = pd.date_range("2025-01-01", periods=130, freq="D")

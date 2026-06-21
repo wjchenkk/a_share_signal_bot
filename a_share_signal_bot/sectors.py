@@ -73,6 +73,26 @@ def write_auto_sector_map(mp: Dict[str, str], path: str | Path) -> None:
     pd.DataFrame(rows).to_csv(p, index=False, encoding="utf-8-sig")
 
 
+def resolve_auto_sector_map_path(pool_path: str | Path, cfg: Dict[str, Any]) -> Path:
+    """Resolve auto sector map paths independent of the pool file location."""
+    sector_cfg = cfg.get("strategy", {}).get("sector", {})
+    raw = Path(sector_cfg.get("auto_map_path", "cache/auto_sector_map.csv"))
+    if raw.is_absolute():
+        return raw
+    if raw.parent == Path("."):
+        return Path(cfg.get("data", {}).get("cache_dir", "cache")) / raw
+    return raw
+
+
+def legacy_auto_sector_map_path(pool_path: str | Path, cfg: Dict[str, Any]) -> Path:
+    """Old behavior resolved relative auto_map_path under the pool directory."""
+    sector_cfg = cfg.get("strategy", {}).get("sector", {})
+    raw = Path(sector_cfg.get("auto_map_path", "cache/auto_sector_map.csv"))
+    if raw.is_absolute():
+        return raw
+    return Path(pool_path).parent / raw
+
+
 def enrich_pool_sectors(
     pool: pd.DataFrame,
     pool_path: str | Path,
@@ -106,19 +126,32 @@ def enrich_pool_sectors(
             axis=1,
         )
 
-    auto_path = Path(sector_cfg.get("auto_map_path", "cache/auto_sector_map.csv"))
-    if not auto_path.is_absolute():
-        auto_path = Path(pool_path).parent / auto_path
+    auto_fill = bool(sector_cfg.get("auto_fill", True)) and source not in {"", "none", "off", "false"}
+    auto_path = resolve_auto_sector_map_path(pool_path, cfg)
     cache_hours = float(cfg.get("data", {}).get("cache_hours", 24))
-    auto_map_is_fresh = (source not in {"concept", "concept_first"}) or is_cache_fresh(auto_path, cache_hours)
-    auto_mp = load_auto_sector_map(auto_path) if auto_map_is_fresh else {}
+    allow_stale_auto_map = bool(sector_cfg.get("allow_stale_auto_map", True))
+    auto_mp: Dict[str, str] = {}
+    if auto_fill:
+        candidate_auto_paths = [auto_path]
+        legacy_path = legacy_auto_sector_map_path(pool_path, cfg)
+        if legacy_path != auto_path:
+            candidate_auto_paths.append(legacy_path)
+        for candidate_path in candidate_auto_paths:
+            if not candidate_path.exists():
+                continue
+            auto_map_is_fresh = (source not in {"concept", "concept_first"}) or is_cache_fresh(candidate_path, cache_hours)
+            if auto_map_is_fresh or allow_stale_auto_map:
+                auto_mp.update(load_auto_sector_map(candidate_path))
+        if auto_mp:
+            existing_canonical = load_auto_sector_map(auto_path) if auto_path.exists() else {}
+            if len(auto_mp) > len(existing_canonical):
+                write_auto_sector_map(auto_mp, auto_path)
     if auto_mp:
         out["sector"] = out.apply(
             lambda r: normalize_sector_value(r.get("sector", "")) or auto_mp.get(str(r.get("code", "")), ""),
             axis=1,
         )
 
-    auto_fill = bool(sector_cfg.get("auto_fill", True)) and source not in {"", "none", "off", "false"}
     missing_codes = [str(c) for c in out.loc[out["sector"].apply(normalize_sector_value) == "", "code"].tolist()]
     if auto_fill and fetcher is not None and missing_codes:
         max_boards = int(sector_cfg.get("auto_scan_max_boards", 0) or 0)
@@ -167,5 +200,3 @@ def enrich_pool_sectors(
         except Exception:
             pass
     return out
-
-

@@ -70,6 +70,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "request_retries": 3,
         "retry_backoff_seconds": [1.5, 4.0, 8.0],
         "allow_stale_cache_on_error": True,
+        "use_stale_cache_on_network_error": True,
+        "fail_fast_network_errors": True,
         "max_error_rate_for_valid_run": 0.20,
     },
     "strategy": {
@@ -96,6 +98,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "auto_fallback_sources": ["industry", "sw"],
             "auto_write_back": True,          # 行业模式可写回 stock_pool.csv；概念模式只写缓存，避免题材固化
             "auto_map_path": "cache/auto_sector_map_concept_first.csv",
+            "allow_stale_auto_map": True,     # 数据源不可用时允许用旧自动板块映射，避免冷缓存全量反查板块。
             "auto_scan_max_boards": 0,        # 0 表示扫描全部行业/概念板块；调试时可设 20
             "min_sector_size": 3,
             "mainline_score_threshold": 66.0,
@@ -537,4 +540,3 @@ def split_reason_text(text: Any) -> List[str]:
     if text is None or (isinstance(text, float) and np.isnan(text)):
         return []
     return unique_nonempty(re.split(r"[；;]", str(text)))
-

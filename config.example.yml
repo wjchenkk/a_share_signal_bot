@@ -24,6 +24,8 @@ data:
   request_retries: 3
   retry_backoff_seconds: [1.5, 4.0, 8.0]
   allow_stale_cache_on_error: true
+  use_stale_cache_on_network_error: true
+  fail_fast_network_errors: true
   max_error_rate_for_valid_run: 0.20
 
 strategy:
@@ -56,6 +58,7 @@ strategy:
     auto_fallback_sources: ["industry", "sw"] # 概念缺失时依次用东方财富行业缓存、申万一级行业托底
     auto_write_back: true                     # 行业模式可写回 stock_pool.csv；概念模式只写缓存，避免题材固化
     auto_map_path: "cache/auto_sector_map_concept_first.csv"
+    allow_stale_auto_map: true                # 数据源不可用时允许用旧自动板块映射，避免冷缓存全量反查板块
     auto_scan_max_boards: 0                   # 0=全部；调试可设 20
     min_sector_size: 3
     mainline_score_threshold: 68.0
