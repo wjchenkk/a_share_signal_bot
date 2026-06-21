@@ -3,8 +3,11 @@ from __future__ import annotations
 import copy
 import importlib.util
 import io
+import os
 import sys
 import tempfile
+import time
+import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -274,6 +277,33 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertEqual(df.attrs.get("data_provider"), "stale_cache")
             self.assertGreaterEqual(len(df), 200)
 
+    def test_index_spot_cache_uses_realtime_freshness_window(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["data"]["cache_dir"] = td
+            cfg["data"]["spot_cache_minutes"] = 0.01
+            stale_path = Path(td) / "index_spot_all.csv"
+            pd.DataFrame([{"代码": "sh000001", "最新价": 3000.0}]).to_csv(stale_path, index=False)
+            old_ts = time.time() - 600
+            os.utime(stale_path, (old_ts, old_ts))
+
+            fetcher = AkshareFetcher(cfg)
+            calls = []
+            fresh = pd.DataFrame([{"代码": "sh000001", "最新价": 3100.0}])
+            old_ak = sys.modules.get("akshare")
+            sys.modules["akshare"] = types.SimpleNamespace(stock_zh_index_spot_sina=lambda: fresh)
+            try:
+                fetcher._with_retry = lambda label, func: calls.append(label) or fresh  # type: ignore[method-assign]
+                out = fetcher.index_spot_all()
+            finally:
+                if old_ak is None:
+                    sys.modules.pop("akshare", None)
+                else:
+                    sys.modules["akshare"] = old_ak
+
+            self.assertEqual(calls, ["指数实时行情"])
+            self.assertEqual(float(out.iloc[0]["最新价"]), 3100.0)
+
     def test_index_tail_skips_stale_snapshot_after_last_trade_day(self) -> None:
         hist = deterministic_hist(3000.0, 3600.0, periods=220)
         hist["date"] = pd.date_range(end="2026-06-18", periods=len(hist), freq="B")
@@ -299,6 +329,25 @@ class OfflineRegressionTests(unittest.TestCase):
             market_data.now_cn = old_now  # type: ignore[assignment]
         self.assertEqual(len(out), len(hist))
         self.assertEqual(pd.Timestamp(out.iloc[-1]["date"]).strftime("%Y-%m-%d"), "2026-06-18")
+
+    def test_market_date_mismatch_forces_defensive_regime(self) -> None:
+        fresh = deterministic_hist(3000.0, 3800.0, periods=260)
+        fresh["date"] = pd.date_range(end="2026-06-19", periods=len(fresh), freq="B")
+        stale = deterministic_hist(9000.0, 11500.0, periods=260)
+        stale["date"] = pd.date_range(end="2026-06-16", periods=len(stale), freq="B")
+
+        class SplitDateFetcher:
+            def index_hist(self, symbol: str) -> pd.DataFrame:
+                return fresh.copy() if symbol == "idx_fresh" else stale.copy()
+
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["data"]["market_indices"] = ["idx_fresh", "idx_stale"]
+        cfg["data"]["use_realtime_tail"] = False
+        cfg["data"]["market_max_date_lag_days"] = 1
+        market = market_data.evaluate_market(SplitDateFetcher(), cfg)  # type: ignore[arg-type]
+        self.assertEqual(market.regime, "weak")
+        self.assertEqual(float(market.target_exposure), 0.0)
+        self.assertIn("指数数据日期不一致", market.summary)
 
     def test_stock_tail_appends_changed_realtime_snapshot(self) -> None:
         hist = deterministic_hist(10.0, 12.0, periods=220)
@@ -329,6 +378,36 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(len(out), len(hist) + 1)
         self.assertEqual(pd.Timestamp(out.iloc[-1]["date"]).strftime("%Y-%m-%d"), "2026-06-19")
         self.assertAlmostEqual(float(out.iloc[-1]["close"]), latest)
+
+    def test_stale_realtime_spot_is_not_used_for_prefilter_or_snapshot(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["data"]["two_stage_scan"] = True
+        cfg["data"]["prefilter_pool_when_gt"] = 3
+        cfg["data"]["max_scan_per_run"] = 2
+        pool = pd.DataFrame(
+            [
+                {"code": "600001", "name": "一"},
+                {"code": "600002", "name": "二"},
+                {"code": "600003", "name": "三"},
+                {"code": "600004", "name": "四"},
+            ]
+        )
+        stale_spot = pd.DataFrame(
+            [
+                {"代码": "600004", "名称": "四", "最新价": 10.0, "涨跌幅": 2.0, "成交额": 9_000_000_000, "换手率": 10.0},
+            ]
+        )
+        stale_spot.attrs["data_provider"] = "stale_cache"
+        selected, msg = scanner.prefilter_pool_for_stability(pool, stale_spot, cfg)
+        self.assertEqual(selected["code"].tolist(), ["600001", "600002"])
+        self.assertIn("优先扫描2只", msg)
+        self.assertIn("实时行情为旧缓存", msg)
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg["data"]["intraday_snapshot_dir"] = str(Path(td) / "snap")
+            out = scanner.update_intraday_snapshot_from_spot("600004", stale_spot, cfg)
+            self.assertTrue(out.empty)
+            self.assertFalse((Path(td) / "snap" / "600004.csv").exists())
 
     def test_position_monitor_ignores_stale_minute_window(self) -> None:
         stale_minutes = pd.DataFrame(
@@ -368,6 +447,68 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(by_code.loc["600002", "status"], "PENDING_BUY")
         self.assertEqual(by_code.loc["600003", "status"], "ACTIVE")
         self.assertEqual(actions["action"].tolist(), ["EXPIRE_PENDING_BUY"])
+
+    def test_trade_manager_filters_stale_latest_signals(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg.setdefault("trade_lifecycle", {})["latest_signal_max_age_days"] = 3
+        signals = pd.DataFrame(
+            [
+                {"code": "600001", "name": "旧信号", "date": "2026-06-17", "target_shares": 100},
+                {"code": "600002", "name": "新信号", "date": "2026-06-20", "target_shares": 100},
+            ]
+        )
+        fresh, note = trade_manager.filter_fresh_signals(signals, cfg, pd.Timestamp("2026-06-21"))
+        self.assertEqual(fresh["code"].tolist(), ["600002"])
+        self.assertIn("已忽略 1 条过期买入信号", note)
+
+        missing_date, note = trade_manager.filter_fresh_signals(signals.drop(columns=["date"]), cfg, pd.Timestamp("2026-06-21"))
+        self.assertTrue(missing_date.empty)
+        self.assertIn("缺少信号日期", note)
+
+    def test_trade_manager_run_does_not_create_plan_from_stale_latest_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            signals_out = root / "output"
+            trade_out = root / "trade_output"
+            signals_out.mkdir()
+            pd.DataFrame(
+                [
+                    {
+                        "code": "600001",
+                        "name": "旧信号",
+                        "date": "2026-06-17",
+                        "close": 10.0,
+                        "target_shares": 100,
+                        "stop_loss": 9.2,
+                        "take_profit_1": 11.2,
+                        "take_profit_2": 12.4,
+                    }
+                ]
+            ).to_csv(signals_out / "latest_signals_raw.csv", index=False, encoding="utf-8-sig")
+            args = types.SimpleNamespace(
+                action="from_signals",
+                portfolio=str(root / "portfolio.csv"),
+                state=str(root / "trade_state.csv"),
+                signals_out=str(signals_out),
+                config=str(ROOT / "config.example.yml"),
+                out=str(trade_out),
+                account=200000.0,
+                mode="intraday",
+                sync=False,
+                no_add=False,
+                refresh=False,
+                message_file="",
+            )
+            old_now = trade_manager.now_cn
+            try:
+                trade_manager.now_cn = lambda: pd.Timestamp("2026-06-21 10:00").to_pydatetime()  # type: ignore[assignment]
+                actions, msg, _ = trade_manager.run(args)
+            finally:
+                trade_manager.now_cn = old_now  # type: ignore[assignment]
+            state = trade_manager.read_state(root / "trade_state.csv")
+            self.assertTrue(actions.empty)
+            self.assertTrue(state.empty)
+            self.assertIn("过期买入信号", msg)
 
     def test_trading_pool_can_require_local_history(self) -> None:
         with tempfile.TemporaryDirectory() as td:

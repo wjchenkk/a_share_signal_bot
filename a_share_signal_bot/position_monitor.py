@@ -140,6 +140,8 @@ def fetch_minute(code: str, cfg: Dict[str, Any], period: str = "5", spot_all: Op
         provider = str(provider).lower().strip()
         try:
             if provider in {"snapshot", "spot_snapshot", "local"}:
+                if bot.is_stale_data_frame(spot_all):
+                    raise ValueError("实时行情为旧缓存，跳过本地快照")
                 out = _snapshot_minute_from_spot(code, cfg, spot_all if spot_all is not None else pd.DataFrame())
                 out = normalize_minute_df(out)
                 if not out.empty:
@@ -170,7 +172,7 @@ def fetch_minute(code: str, cfg: Dict[str, Any], period: str = "5", spot_all: Op
             errors.append(f"{provider}: {exc}")
             continue
     # 最终兜底：不抛异常，返回快照。持仓监控宁可退化，也不能崩。
-    if bool(cfg.get("position_monitor", {}).get("minute_allow_snapshot_fallback", True)):
+    if bool(cfg.get("position_monitor", {}).get("minute_allow_snapshot_fallback", True)) and not bot.is_stale_data_frame(spot_all):
         out = _snapshot_minute_from_spot(code, cfg, spot_all if spot_all is not None else pd.DataFrame())
         out = normalize_minute_df(out)
         if not out.empty:
@@ -268,7 +270,8 @@ def analyze_position(
         result.update({"action": "DATA_ERROR", "action_cn": "数据错误", "reason": f"日K获取失败：{exc}", "trade_shares": 0, "price_range": ""})
         return result
 
-    spot = current_spot_row(spot_all, code)
+    stale_spot = bot.is_stale_data_frame(spot_all)
+    spot = {} if stale_spot else current_spot_row(spot_all, code)
     current = bot.safe_float(spot.get("price"), bot.safe_float(last.get("close")))
     if not np.isfinite(current) or current <= 0:
         current = bot.safe_float(last.get("close"))
@@ -283,7 +286,7 @@ def analyze_position(
     hard_stop = max([x for x in [cost * (1 - float(pm.get("max_loss_pct", 0.06))), ma20 * 0.975 if np.isfinite(ma20) else np.nan, low10 * 0.985 if np.isfinite(low10) else np.nan, current - 2.2 * atr if np.isfinite(atr) else np.nan] if np.isfinite(x) and x > 0] or [cost * 0.94])
     trend_stop = max([x for x in [ma10 * 0.985 if np.isfinite(ma10) else np.nan, ma20 * 0.985 if np.isfinite(ma20) else np.nan, low20 * 0.985 if np.isfinite(low20) else np.nan] if np.isfinite(x) and x > 0] or [hard_stop])
 
-    intraday_vwap = np.nan; minute_ma = np.nan; intraday_high = bot.safe_float(spot.get("high")); intraday_low = bot.safe_float(spot.get("low")); intraday_note = "分钟K缺失"
+    intraday_vwap = np.nan; minute_ma = np.nan; intraday_high = bot.safe_float(spot.get("high")); intraday_low = bot.safe_float(spot.get("low")); intraday_note = "实时行情为旧缓存，按日K收盘价观察" if stale_spot else "分钟K缺失"
     try:
         mdf = fetch_minute(code, cfg, period=str(pm.get("minute_period", "5")), spot_all=spot_all)
         if not mdf.empty:

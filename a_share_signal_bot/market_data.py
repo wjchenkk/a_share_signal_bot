@@ -545,7 +545,7 @@ class AkshareFetcher:
         if self._index_spot_cache is not None:
             return self._index_spot_cache.copy()
         cache_path = self.cache_dir / "index_spot_all.csv"
-        cached = self._read_cache(cache_path)
+        cached = self._read_spot_cache(cache_path)
         if cached is not None:
             self._index_spot_cache = cached
             return cached.copy()
@@ -1249,6 +1249,34 @@ def compute_risk_gate(
     }
 
 
+def enforce_market_date_consistency(details: pd.DataFrame, cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, str, bool]:
+    if details is None or details.empty or "date" not in details.columns:
+        return details, "", False
+    max_lag_days = int(cfg.get("data", {}).get("market_max_date_lag_days", 1) or 0)
+    if max_lag_days < 0:
+        return details, "", False
+    out = details.copy()
+    dates = pd.to_datetime(out["date"], errors="coerce")
+    valid_dates = dates.dropna()
+    if valid_dates.empty:
+        return out, "", False
+    latest = pd.Timestamp(valid_dates.max()).normalize()
+    earliest = pd.Timestamp(valid_dates.min()).normalize()
+    spread_days = int((latest - earliest).days)
+    if spread_days <= max_lag_days:
+        return out, "", False
+    stale_mask = dates.notna() & (dates.dt.normalize() < latest - pd.Timedelta(days=max_lag_days))
+    warning = f"指数数据日期不一致：最新{latest.strftime('%Y-%m-%d')}，最旧{earliest.strftime('%Y-%m-%d')}，超过{max_lag_days}天，已降为弱势防守"
+    if "data_warning" not in out.columns:
+        out["data_warning"] = ""
+    out.loc[stale_mask, "data_warning"] = (
+        out.loc[stale_mask, "data_warning"].astype(str).replace("nan", "").str.strip()
+        + "；"
+        + warning
+    ).str.strip("；")
+    return out, warning, True
+
+
 def evaluate_market(fetcher: AkshareFetcher, cfg: Dict[str, Any]) -> MarketState:
     index_symbols = cfg["data"].get("market_indices") or ["sh000001"]
     if isinstance(index_symbols, str):
@@ -1413,11 +1441,15 @@ def evaluate_market(fetcher: AkshareFetcher, cfg: Dict[str, Any]) -> MarketState
             market_ret60=0,
         )
 
+    details, date_warning, force_defensive = enforce_market_date_consistency(details, cfg)
     valid = details[pd.to_numeric(details.get("close"), errors="coerce").notna()].copy()
     if valid.empty:
         valid = details.copy()
     avg_score = float(pd.to_numeric(valid["score"], errors="coerce").fillna(0).mean())
     min_score = float(pd.to_numeric(valid["score"], errors="coerce").fillna(0).min())
+    if force_defensive:
+        avg_score = min(avg_score, 44.0)
+        min_score = min(min_score, 0.0)
     market_ret20 = float(pd.to_numeric(valid.get("ret20"), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().mean()) if "ret20" in valid else 0.0
     market_ret60 = float(pd.to_numeric(valid.get("ret60"), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().mean()) if "ret60" in valid else 0.0
 
@@ -1449,4 +1481,6 @@ def evaluate_market(fetcher: AkshareFetcher, cfg: Dict[str, Any]) -> MarketState
     summary = f"大盘状态={regime}，盘面结构={structure_text}，图形分={avg_score:.1f}，建议总权益仓位={exposure:.0%}"
     if note_text:
         summary += f"，盘面特征：{note_text}"
+    if date_warning:
+        summary += f"，数据提示：{date_warning}"
     return MarketState(date, avg_score, regime, exposure, details, summary, market_ret20, market_ret60)

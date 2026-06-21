@@ -562,11 +562,15 @@ def evaluate_market_asof(index_inds: Dict[str, pd.DataFrame], cfg: Dict[str, Any
     if details.empty or details["score"].replace([np.inf, -np.inf], np.nan).dropna().empty:
         return bot.MarketState(ts_to_ymd(asof), 0, "weak", 0, details, "大盘数据不足，禁止新开仓", 0, 0)
 
+    details, date_warning, force_defensive = bot.enforce_market_date_consistency(details, cfg)
     valid = details[pd.to_numeric(details.get("close"), errors="coerce").notna()].copy()
     if valid.empty:
         valid = details.copy()
     avg_score = float(pd.to_numeric(valid["score"], errors="coerce").fillna(0).mean())
     min_score = float(pd.to_numeric(valid["score"], errors="coerce").fillna(0).min())
+    if force_defensive:
+        avg_score = min(avg_score, 44.0)
+        min_score = min(min_score, 0.0)
     market_ret20 = float(pd.to_numeric(valid.get("ret20"), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().mean()) if "ret20" in valid else 0.0
     market_ret60 = float(pd.to_numeric(valid.get("ret60"), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().mean()) if "ret60" in valid else 0.0
 
@@ -597,6 +601,8 @@ def evaluate_market_asof(index_inds: Dict[str, pd.DataFrame], cfg: Dict[str, Any
     summary = f"大盘状态={regime}，盘面结构={structure_text}，图形分={avg_score:.1f}，建议总权益仓位={exposure:.0%}"
     if note_text:
         summary += f"，盘面特征：{note_text}"
+    if date_warning:
+        summary += f"，数据提示：{date_warning}"
     return bot.MarketState(date, avg_score, regime, exposure, details, summary, market_ret20, market_ret60)
 
 

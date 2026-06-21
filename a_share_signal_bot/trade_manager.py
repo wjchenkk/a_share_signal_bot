@@ -163,6 +163,30 @@ def read_latest_signals(out_dir: Path) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def filter_fresh_signals(
+    signals: pd.DataFrame,
+    cfg: Dict[str, Any],
+    current_date: Optional[pd.Timestamp] = None,
+) -> Tuple[pd.DataFrame, str]:
+    if signals is None or signals.empty:
+        return pd.DataFrame(), ""
+    max_age_days = int(cfg.get("trade_lifecycle", {}).get("latest_signal_max_age_days", 3) or 0)
+    if max_age_days <= 0:
+        return signals.copy(), ""
+    if "date" not in signals.columns:
+        return pd.DataFrame(columns=signals.columns), "最新信号缺少信号日期，已拒绝生成买入计划"
+    cd = pd.Timestamp(current_date or today_str()).normalize()
+    out = signals.copy()
+    signal_dates = out["date"].map(parse_date)
+    ages = signal_dates.map(lambda x: (cd - pd.Timestamp(x).normalize()).days if x is not None else max_age_days + 1)
+    fresh_mask = ages <= max_age_days
+    dropped = int((~fresh_mask).sum())
+    out = out[fresh_mask].copy()
+    if dropped <= 0:
+        return out, ""
+    return out, f"已忽略 {dropped} 条过期买入信号，最新信号超过 {max_age_days} 天不再生成 T+1 买入计划"
+
+
 def price_range(price: float, mode: str = "sell") -> str:
     if not np.isfinite(price) or price <= 0:
         return "按盘口成交"
@@ -470,7 +494,7 @@ def current_spot_map(fetcher: bot.AkshareFetcher) -> pd.DataFrame:
 
 def current_price_from_spot_or_hist(code: str, spot: pd.DataFrame, hist: pd.DataFrame) -> Tuple[float, Dict[str, float]]:
     row = {}
-    if position_monitor is not None and spot is not None and not spot.empty:
+    if position_monitor is not None and spot is not None and not spot.empty and not bot.is_stale_data_frame(spot):
         try:
             row = position_monitor.current_spot_row(spot, code)
         except Exception:
@@ -716,6 +740,7 @@ def run(args: argparse.Namespace) -> Tuple[pd.DataFrame, str, Path]:
     signals_dir = Path(args.signals_out)
     state = read_state(state_path)
     signals = read_latest_signals(signals_dir)
+    signals, stale_signal_note = filter_fresh_signals(signals, cfg)
     fetcher = bot.AkshareFetcher(cfg, refresh=bool(args.refresh))
     # chat 模式决定动作
     action = args.action
@@ -735,6 +760,8 @@ def run(args: argparse.Namespace) -> Tuple[pd.DataFrame, str, Path]:
         args.mode = "intraday"
     all_actions: List[pd.DataFrame] = []
     sync_notes: List[str] = []
+    if stale_signal_note:
+        sync_notes.append(stale_signal_note)
     if action in {"sync", "advise", "all"} or args.sync:
         state, notes = sync_with_portfolio(state, portfolio_path, cfg, fetcher, signals, args.account)
         sync_notes.extend(notes)

@@ -53,7 +53,11 @@ def prefilter_pool_for_stability(pool: pd.DataFrame, stock_spot: pd.DataFrame, c
     if trigger <= 0 or max_scan <= 0 or len(pool) <= trigger:
         return pool, ""
     out = pool.copy()
-    if stock_spot is not None and not stock_spot.empty and "代码" in stock_spot.columns:
+    stale_spot_note = ""
+    if is_stale_data_frame(stock_spot):
+        out = pool.copy()
+        stale_spot_note = "实时行情为旧缓存，改用股票池原始顺序。"
+    elif stock_spot is not None and not stock_spot.empty and "代码" in stock_spot.columns:
         spot = stock_spot.copy()
         spot["code"] = spot["代码"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
         cols = [c for c in ["code", "最新价", "涨跌幅", "成交额", "换手率", "名称"] if c in spot.columns]
@@ -77,6 +81,8 @@ def prefilter_pool_for_stability(pool: pd.DataFrame, stock_spot: pd.DataFrame, c
         out = pool.copy()
     selected = out.head(max_scan)[[c for c in pool.columns if c in out.columns]].copy()
     msg = f"股票池{len(pool)}只，启用两阶段稳定扫描：本次优先扫描{len(selected)}只；未扫描股票不会被删除。"
+    if stale_spot_note:
+        msg += stale_spot_note
     return selected, msg
 
 
@@ -92,7 +98,7 @@ def update_intraday_snapshot_from_spot(code: str, spot_all: pd.DataFrame, cfg: D
     当东方财富/新浪分钟K失效时，10分钟定时调用会不断积累快照，足够判断VWAP近似、日内高低位、弱于快照均线等。
     """
     code = normalize_code(code)
-    if spot_all is None or spot_all.empty or "代码" not in spot_all.columns:
+    if spot_all is None or spot_all.empty or "代码" not in spot_all.columns or is_stale_data_frame(spot_all):
         return pd.DataFrame()
     row = spot_all[spot_all["代码"].astype(str).str.zfill(6) == code]
     if row.empty:
@@ -142,6 +148,8 @@ def intraday_buy_confirmation(code: str, spot_all: pd.DataFrame, cfg: Dict[str, 
     snap = update_intraday_snapshot_from_spot(code, spot_all, cfg)
     if spot_all is None or spot_all.empty or "代码" not in spot_all.columns:
         return True, "实时行情缺失，跳过日内确认"
+    if is_stale_data_frame(spot_all):
+        return True, "实时行情为旧缓存，跳过日内确认"
     row = spot_all[spot_all["代码"].astype(str).str.zfill(6) == normalize_code(code)]
     if row.empty:
         return True, "实时行情无该股，跳过日内确认"
@@ -220,6 +228,9 @@ def scan(
     except Exception as exc:
         print(f"[实时行情] 获取失败，继续使用日K扫描：{exc}")
         stock_spot = pd.DataFrame()
+    realtime_spot_ok = not is_stale_data_frame(stock_spot)
+    if not stock_spot.empty and not realtime_spot_ok:
+        print("[实时行情] 当前只拿到旧缓存，本次不用于尾盘K线、日内确认或预筛。")
 
     prefilter_msg = ""
     if not limit:
@@ -240,7 +251,7 @@ def scan(
         name = r.get("name", "")
         try:
             hist = fetcher.stock_hist(code, start_date, end_date, adjust)
-            if cfg["data"].get("use_realtime_tail") and not stock_spot.empty:
+            if cfg["data"].get("use_realtime_tail") and not stock_spot.empty and realtime_spot_ok:
                 hist = merge_stock_tail_realtime(hist, stock_spot, code)
             metrics = compute_raw_metrics(code, name, hist, cfg, market)
             metrics["sector"] = str(r.get("sector", "未分组") or "未分组")
@@ -266,7 +277,7 @@ def scan(
             candidates["is_signal"] = False
             candidates["data_quality_warning"] = data_quality_skip_reason
     # v6.5: 对已经达标或接近达标的股票做日内确认，避免日K信号在盘中明显走弱时仍然推送。
-    if not candidates.empty and bool(cfg.get("data", {}).get("intraday_buy_filter", True)) and not stock_spot.empty:
+    if not candidates.empty and bool(cfg.get("data", {}).get("intraday_buy_filter", True)) and not stock_spot.empty and realtime_spot_ok:
         intraday_notes = []
         intraday_oks = []
         threshold = float(cfg["strategy"].get("score_threshold", 68))

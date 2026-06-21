@@ -73,6 +73,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "use_stale_cache_on_network_error": True,
         "fail_fast_network_errors": True,
         "max_error_rate_for_valid_run": 0.20,
+        "market_max_date_lag_days": 1,
     },
     "strategy": {
         "min_history_days": 160,
@@ -310,6 +311,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "out_dir": "trade_output",
         "max_hold_days": 60,
         "pending_buy_expire_days": 5,
+        "latest_signal_max_age_days": 3,
         "intraday_stop_take_profit": True,
         "close_confirm_trend_exit": True,
         "allow_add": True,
@@ -597,6 +599,13 @@ def is_cache_fresh(path: Path, hours: float) -> bool:
         return False
     age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
     return age.total_seconds() < hours * 3600
+
+
+def is_stale_data_frame(df: Any) -> bool:
+    attrs = getattr(df, "attrs", {}) or {}
+    provider = str(attrs.get("data_provider", "")).strip().lower()
+    warning = str(attrs.get("data_warning", ""))
+    return provider == "stale_cache" or "旧缓存" in warning
 
 
 def market_code_prefix(code: str) -> str:
