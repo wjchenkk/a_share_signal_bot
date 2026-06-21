@@ -152,6 +152,8 @@ def enrich_etf_pool_candidates(raw: pd.DataFrame, cfg: Dict[str, Any]) -> pd.Dat
     pool_cfg = cfg.get("etf", {}).get("pool_builder", {})
     exclude_keywords = list(pool_cfg.get("exclude_keywords", []))
     min_amount = float(pool_cfg.get("min_amount", 30_000_000))
+    min_amount_by_asset_class = dict(pool_cfg.get("min_amount_by_asset_class", {}))
+    allow_missing_amount_asset_classes = set(pool_cfg.get("allow_missing_amount_asset_classes", []))
     min_price = float(pool_cfg.get("min_price", 0.2))
     out = raw.copy()
     out["code"] = out["code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
@@ -164,16 +166,18 @@ def enrich_etf_pool_candidates(raw: pd.DataFrame, cfg: Dict[str, Any]) -> pd.Dat
     out["tracking_key"] = out["asset_class"].astype(str) + "/" + out["theme"].astype(str)
     out["eligible"] = True
     out["exclude_reason"] = ""
-    low_amount = out["amount"].isna() | (out["amount"] < min_amount)
+    out["min_amount_required"] = out["asset_class"].map(lambda x: float(min_amount_by_asset_class.get(str(x), min_amount)))
+    missing_amount_allowed = out["amount"].isna() & out["asset_class"].astype(str).isin(allow_missing_amount_asset_classes)
+    low_amount = (out["amount"].isna() | (out["amount"] < out["min_amount_required"])) & (~missing_amount_allowed)
     out.loc[low_amount, "eligible"] = False
-    out.loc[low_amount, "exclude_reason"] = out.loc[low_amount, "exclude_reason"].astype(str) + f"成交额<{min_amount:,.0f}；"
+    out.loc[low_amount, "exclude_reason"] = out.loc[low_amount, "exclude_reason"].astype(str) + "成交额不足；"
     low_price = out["price"].notna() & (out["price"] < min_price)
     out.loc[low_price, "eligible"] = False
     out.loc[low_price, "exclude_reason"] = out.loc[low_price, "exclude_reason"].astype(str) + f"价格<{min_price:.2f}；"
     if exclude_keywords:
         pattern = "|".join(re.escape(str(x)) for x in exclude_keywords if str(x).strip())
         if pattern:
-            excluded = out["name"].str.contains(pattern, na=False, regex=True)
+            excluded = out["name"].apply(lambda name: any((str(kw).strip() in str(name)) and not (str(kw).strip() == "现金" and "现金流" in str(name)) for kw in exclude_keywords if str(kw).strip()))
             out.loc[excluded, "eligible"] = False
             out.loc[excluded, "exclude_reason"] = out.loc[excluded, "exclude_reason"].astype(str) + "名称排除；"
     out["liquidity_rank"] = out["amount"].rank(ascending=False, method="min")

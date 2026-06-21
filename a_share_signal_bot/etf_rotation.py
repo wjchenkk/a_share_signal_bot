@@ -9,7 +9,7 @@ from .market_data import add_indicators, safe_float
 def classify_asset_class(name: Any, category: Any) -> str:
     text = f"{name or ''} {category or ''}".lower()
     cn_text = f"{name or ''} {category or ''}"
-    if any(k in cn_text for k in ["债", "货币", "现金", "国债", "政金债", "短融"]):
+    if any(k in cn_text for k in ["债", "货币", "国债", "政金债", "短融"]):
         return "defensive"
     if any(k in cn_text for k in ["黄金", "商品", "原油", "豆粕", "有色"]):
         return "commodity"

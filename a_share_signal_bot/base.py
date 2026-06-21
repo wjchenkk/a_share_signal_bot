@@ -175,6 +175,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "cache_hours": 24,
             "max_size": 40,
             "min_amount": 30_000_000,
+            "min_amount_by_asset_class": {
+                "defensive": 0
+            },
+            "allow_missing_amount_asset_classes": ["defensive"],
             "min_price": 0.20,
             "max_per_theme": 2,
             "asset_class_quotas": {

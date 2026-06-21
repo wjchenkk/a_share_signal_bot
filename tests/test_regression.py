@@ -413,8 +413,30 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(etf_rotation.classify_asset_class("科创50ETF华夏", ""), "broad")
         self.assertEqual(etf_rotation.classify_asset_class("香港证券ETF易方达", ""), "cross_border")
         self.assertEqual(etf_rotation.classify_asset_class("中概互联网ETF易方达", ""), "cross_border")
+        self.assertEqual(etf_rotation.classify_asset_class("自由现金流ETF华夏", ""), "sector")
         self.assertEqual(etf_pool.theme_from_name("科创50ETF华夏", "broad"), "科创50")
         self.assertEqual(etf_pool.theme_from_name("上证50ETF华夏", "broad"), "上证50")
+
+    def test_etf_pool_allows_defensive_missing_spot_amount(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["pool_builder"]["min_amount"] = 30_000_000
+        raw = etf_pool.normalize_etf_spot(
+            pd.DataFrame(
+                [
+                    {"代码": "511010", "名称": "国泰上证5年期国债ETF", "最新价": "", "成交额": ""},
+                    {"代码": "159201", "名称": "自由现金流ETF华夏", "最新价": 1.126, "成交额": "3亿"},
+                    {"代码": "159001", "名称": "货币ETF易方达", "最新价": 100.0, "成交额": "3亿"},
+                ]
+            ),
+            "deterministic",
+        )
+        candidates = etf_pool.enrich_etf_pool_candidates(raw, cfg)
+        by_code = candidates.set_index("code")
+        self.assertTrue(bool(by_code.at["511010", "eligible"]))
+        self.assertEqual(by_code.at["511010", "asset_class"], "defensive")
+        self.assertTrue(bool(by_code.at["159201", "eligible"]))
+        self.assertEqual(by_code.at["159201", "asset_class"], "sector")
+        self.assertFalse(bool(by_code.at["159001", "eligible"]))
 
     def test_build_etf_pool_writes_independent_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
