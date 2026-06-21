@@ -983,6 +983,9 @@ def format_rotation_message(positions: pd.DataFrame, candidates: pd.DataFrame, r
     lines = [f"ETF轮动配置 {now_cn().strftime('%Y-%m-%d %H:%M')}"]
     lines.append(str(regime.get("summary", "")))
     lines.append(f"目标总仓位：{float(regime.get('target_exposure', 0.0)):.0%}")
+    quality_note = format_data_quality_summary(candidates)
+    if quality_note:
+        lines.append(quality_note)
     lines.append("")
     if positions is None or positions.empty:
         lines.append("当前无ETF轮动配置。")

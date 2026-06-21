@@ -628,6 +628,9 @@ def format_etf_message(signals: pd.DataFrame, candidates: pd.DataFrame, account:
     n_total = 0 if candidates is None else len(candidates)
     n_signal = int(candidates["is_signal"].fillna(False).sum()) if candidates is not None and not candidates.empty and "is_signal" in candidates.columns else 0
     lines.append(f"ETF池扫描：{n_total}只；买入候选：{n_signal}只；最终配置：{0 if signals is None or signals.empty else len(signals)}只。")
+    quality_note = format_data_quality_summary(candidates)
+    if quality_note:
+        lines.append(quality_note)
     lines.append("模型：ETF独立趋势动量 + 平台突破/缩量回踩 + ATR止损 + 风险平价仓位。")
     lines.append("")
     if signals is None or signals.empty:

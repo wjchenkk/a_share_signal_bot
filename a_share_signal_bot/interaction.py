@@ -608,6 +608,9 @@ def format_detailed_report(
     n_signal_all = int(candidates["is_signal"].fillna(False).sum()) if candidates is not None and not candidates.empty and "is_signal" in candidates.columns else n_buy
     lines.append("## 3. 今日总体结果")
     lines.append(f"- 股票池扫描 {n_total} 只；达到买入候选 {n_signal_all} 只；最终配置 {n_buy} 只。")
+    quality_note = format_data_quality_summary(candidates)
+    if quality_note:
+        lines.append(f"- {quality_note}")
     blocker_text = format_blocker_counts(candidates, cfg, top_n=10)
     if blocker_text:
         lines.append(f"- 未买入主要原因：{blocker_text}")
@@ -763,4 +766,3 @@ def explain_from_latest_output(action: ChatAction, out_path: Path) -> str:
     if msg_path.exists():
         return msg_path.read_text(encoding="utf-8")
     return "还没有找到最近一次扫描结果。请先发送：生成买入信号。"
-

@@ -707,6 +707,36 @@ def unique_nonempty(items: Iterable[str]) -> List[str]:
     return out
 
 
+def format_data_quality_summary(df: Optional[pd.DataFrame], label: str = "数据提醒", max_notes: int = 3) -> str:
+    if df is None or df.empty:
+        return ""
+    notes: List[str] = []
+    for col in ["data_quality_warning", "data_warning"]:
+        if col in df.columns:
+            notes.extend(unique_nonempty(df[col].dropna().astype(str).tolist()))
+
+    if "data_provider" in df.columns:
+        provider = df["data_provider"].astype(str)
+        stale_count = int(provider.str.contains("stale_cache|旧缓存", case=False, na=False, regex=True).sum())
+        if stale_count:
+            notes.append(f"旧缓存 {stale_count} 条")
+
+    if "filter_reason" in df.columns:
+        reason = df["filter_reason"].astype(str)
+        error_count = int(reason.str.contains("数据错误", na=False).sum())
+        if error_count:
+            notes.append(f"数据错误 {error_count} 条")
+
+    notes = unique_nonempty(notes)
+    if not notes:
+        return ""
+    if max_notes > 0 and len(notes) > max_notes:
+        shown = notes[:max_notes]
+        shown.append(f"另有{len(notes) - max_notes}项")
+        notes = shown
+    return f"{label}：" + "；".join(notes)
+
+
 def split_reason_text(text: Any) -> List[str]:
     if text is None or (isinstance(text, float) and np.isnan(text)):
         return []

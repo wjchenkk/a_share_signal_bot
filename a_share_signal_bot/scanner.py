@@ -511,6 +511,9 @@ def format_compact_message(
         n_error = int(candidates["filter_reason"].astype(str).str.contains("数据错误", na=False).sum()) if "filter_reason" in candidates.columns else 0
         error_note = f"；数据失败 {n_error} 只" if n_error else ""
         lines.append(f"股票池扫描：{n_total}只；买入候选：{n_signal_all}只；最终配置：{0 if signals is None or signals.empty else len(signals)}只{error_note}。")
+        quality_note = format_data_quality_summary(candidates)
+        if quality_note:
+            lines.append(quality_note)
     lines.append("")
     if signals is None or signals.empty:
         lines.append("今日无最终买入配置。逐股原因已生成，但默认不在推送里展开。")
@@ -569,6 +572,9 @@ def format_message(
         n_signal_all = int(candidates["is_signal"].fillna(False).sum()) if "is_signal" in candidates.columns else 0
         blocker_text = format_blocker_counts(candidates, cfg, top_n=6) if report_cfg.get("show_blocker_counts", True) else ""
         lines.append(f"股票池扫描：{n_total}只；达到买入候选：{n_signal_all}只；最终配置：{0 if signals is None or signals.empty else len(signals)}只。")
+        quality_note = format_data_quality_summary(candidates)
+        if quality_note:
+            lines.append(quality_note)
         if blocker_text:
             lines.append(f"未买入主要原因Top：{blocker_text}")
 

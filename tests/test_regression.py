@@ -1350,6 +1350,64 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertIn("今日无最终买入配置", msg)
         self.assertIn("latest_signals.csv", msg)
 
+    def test_output_messages_surface_data_quality_warnings(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["report"]["include_explanations_in_message"] = False
+        market = bot.MarketState(
+            date="20260620",
+            score=55.0,
+            regime="neutral",
+            target_exposure=0.65,
+            details=pd.DataFrame(),
+            summary="市场中性",
+            market_ret20=0.01,
+            market_ret60=0.02,
+        )
+        candidates = pd.DataFrame(
+            [
+                {
+                    "code": "600519",
+                    "name": "贵州茅台",
+                    "is_signal": False,
+                    "score": 40.0,
+                    "filter_reason": "数据错误：K线为空",
+                    "data_provider": "stale_cache",
+                    "data_quality_warning": "数据源失败率50%，本次不生成买入信号",
+                },
+                {
+                    "code": "300750",
+                    "name": "宁德时代",
+                    "is_signal": False,
+                    "score": 60.0,
+                    "filter_reason": "分数不足",
+                    "data_provider": "tencent",
+                    "data_quality_warning": "",
+                },
+            ]
+        )
+
+        msg = bot.format_message(pd.DataFrame(), market, 100000, candidates=candidates, cfg=cfg)
+        self.assertIn("数据提醒：", msg)
+        self.assertIn("数据源失败率50%", msg)
+        self.assertIn("旧缓存 1 条", msg)
+        self.assertIn("数据错误 1 条", msg)
+
+        report = bot.format_detailed_report(candidates, pd.DataFrame(), market, cfg, 100000)
+        self.assertIn("- 数据提醒：", report)
+        self.assertIn("数据源失败率50%", report)
+
+        etf_msg = etf_strategy.format_etf_message(pd.DataFrame(), candidates, 100000)
+        self.assertIn("数据提醒：", etf_msg)
+        self.assertIn("旧缓存 1 条", etf_msg)
+
+        rotation_msg = etf_rotation.format_rotation_message(
+            pd.DataFrame(),
+            candidates,
+            {"summary": "ETF轮动：震荡", "target_exposure": 0.5},
+        )
+        self.assertIn("数据提醒：", rotation_msg)
+        self.assertIn("数据错误 1 条", rotation_msg)
+
     def test_parse_chat_action(self) -> None:
         action = bot.parse_chat_action("加入 600519 贵州茅台 到股票池")
         self.assertEqual(action.kind, "add")
