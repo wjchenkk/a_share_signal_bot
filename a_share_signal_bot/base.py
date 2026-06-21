@@ -207,6 +207,36 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "max_atr_pct": 0.085,
             "max_drawdown120": -0.24
         },
+        "rotation": {
+            "min_history_days": 180,
+            "min_amount_ma20": 20_000_000,
+            "score_threshold": 55.0,
+            "min_ret60": -0.03,
+            "require_ma60": True,
+            "max_positions": 5,
+            "max_per_category": 2,
+            "max_position_pct": 0.25,
+            "max_correlation": 0.92,
+            "correlation_lookback": 120,
+            "strong_ret60": 0.04,
+            "neutral_ret60": 0.00,
+            "strong_above_ma60_rate": 0.60,
+            "neutral_above_ma60_rate": 0.45,
+            "strong_total_exposure": 0.90,
+            "neutral_total_exposure": 0.65,
+            "weak_total_exposure": 0.35,
+            "defensive_asset_classes": ["defensive", "commodity"],
+            "weak_defensive_bonus": 15.0,
+            "min_risk_vol": 0.008
+        },
+        "backtest": {
+            "initial_cash": 200_000,
+            "years": 3,
+            "rebalance": "W-FRI",
+            "commission_rate": 0.0003,
+            "slippage_bps": 5,
+            "benchmark_code": ""
+        },
     },
     "position_monitor": {
         "portfolio_path": "portfolio.csv",

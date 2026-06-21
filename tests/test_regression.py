@@ -16,6 +16,7 @@ import main as bot
 from a_share_signal_bot.market_data import AkshareFetcher
 from a_share_signal_bot import hot_pool
 from a_share_signal_bot import etf_strategy
+from a_share_signal_bot import etf_rotation
 import a_share_signal_bot.scanner as scanner
 
 
@@ -350,6 +351,70 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertEqual(float(candidates.iloc[0]["score"]), 0.0)
             self.assertIn("数据错误", str(candidates.iloc[0]["filter_reason"]))
             self.assertTrue((out_dir / "latest_etf_errors.csv").exists())
+
+    def test_etf_rotation_selects_with_category_caps(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["min_history_days"] = 120
+        cfg["etf"]["rotation"]["min_amount_ma20"] = 1
+        cfg["etf"]["rotation"]["score_threshold"] = 20.0
+        cfg["etf"]["rotation"]["min_ret60"] = -1.0
+        cfg["etf"]["rotation"]["require_ma60"] = False
+        cfg["etf"]["rotation"]["max_positions"] = 3
+        cfg["etf"]["rotation"]["max_per_category"] = 1
+        pool = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基"},
+                {"code": "159915", "name": "创业板ETF", "category": "宽基"},
+                {"code": "511010", "name": "国债ETF", "category": "债券"},
+            ]
+        )
+        hist_map = {
+            "510300": deterministic_hist(3.0, 5.5, periods=360, breakout=True),
+            "159915": deterministic_hist(2.5, 5.2, periods=360, breakout=True),
+            "511010": deterministic_hist(1.0, 1.12, periods=360, breakout=False),
+        }
+        candidates = etf_rotation.compute_rotation_candidates(pool, hist_map, cfg)
+        regime = etf_rotation.market_regime_from_candidates(candidates, cfg)
+        positions = etf_rotation.select_rotation_positions(candidates, hist_map, cfg, account=100000.0, regime=regime)
+        self.assertFalse(candidates.empty)
+        self.assertGreaterEqual(float(candidates["rotation_score"].max()), 20.0)
+        self.assertFalse(positions.empty)
+        self.assertLessEqual(int((positions["category"] == "宽基").sum()), 1)
+        self.assertIn("target_weight", positions.columns)
+
+    def test_etf_rotation_backtest_outputs_summary(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["min_history_days"] = 120
+        cfg["etf"]["rotation"]["min_amount_ma20"] = 1
+        cfg["etf"]["rotation"]["score_threshold"] = 20.0
+        cfg["etf"]["rotation"]["min_ret60"] = -1.0
+        cfg["etf"]["rotation"]["require_ma60"] = False
+        pool = pd.DataFrame(
+            [
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基"},
+                {"code": "512880", "name": "证券ETF", "category": "行业"},
+                {"code": "511010", "name": "国债ETF", "category": "债券"},
+            ]
+        )
+        hist_map = {
+            "510300": deterministic_hist(3.0, 5.5, periods=420, breakout=True),
+            "512880": deterministic_hist(1.0, 1.8, periods=420, breakout=True),
+            "511010": deterministic_hist(1.0, 1.10, periods=420, breakout=False),
+        }
+        equity, rebalances, summary = etf_rotation.backtest_rotation(
+            pool,
+            hist_map,
+            cfg,
+            account=100000.0,
+            years=2,
+            rebalance="W-FRI",
+        )
+        self.assertFalse(equity.empty)
+        self.assertIn("total_return", summary)
+        self.assertIn("max_drawdown", summary)
+        self.assertIn("benchmark_total_return", summary)
+        self.assertTrue(np.isfinite(float(summary["benchmark_total_return"])))
+        self.assertGreaterEqual(len(rebalances), 1)
 
     def test_add_indicators_stable_columns(self) -> None:
         dates = pd.date_range("2025-01-01", periods=130, freq="D")

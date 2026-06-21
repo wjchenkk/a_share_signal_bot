@@ -354,6 +354,20 @@ etf_output/latest_etf_report.md           ETF策略报告
 cache/etf/etf_CODE_adjust_START_END.csv   ETF历史K缓存
 ```
 
+ETF 轮动配置和回测使用独立入口：
+
+```bash
+# 生成当期ETF轮动组合，带类别上限、相关性过滤和市场强弱仓位
+python etf_rotation.py --mode rotate --pool etf_pool.csv --config config.example.yml --out etf_output --account 100000
+
+# 回测最近3年，每周五再平衡
+python etf_rotation.py --mode backtest --pool etf_pool.csv --config config.example.yml --out etf_output --account 200000 --years 3 --rebalance W-FRI
+```
+
+轮动策略会按全ETF池横截面排序，而不是只判断单只ETF是否出现买点。主要因子包括：
+20/60/120日动量、均线趋势、区间位置、波动率、回撤、流动性。组合层面会限制同类ETF数量，
+并跳过与已选ETF高度相关的重复暴露；市场弱时降低总权益仓位，并给债券/黄金等防守资产额外权重。
+
 ## 7. 输出文件
 
 ```text
