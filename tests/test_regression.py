@@ -15,6 +15,7 @@ import pandas as pd
 import main as bot
 from a_share_signal_bot.market_data import AkshareFetcher
 from a_share_signal_bot import hot_pool
+from a_share_signal_bot import etf_strategy
 import a_share_signal_bot.scanner as scanner
 
 
@@ -131,6 +132,31 @@ class DeterministicFetcher:
         return pd.DataFrame({"代码": [code], "名称": [self.names.get(code, "")]})
 
 
+class DeterministicEtfFetcher:
+    etf_data = {
+        "510300": deterministic_hist(3.0, 5.3, periods=280, breakout=True),
+        "159915": deterministic_hist(4.5, 3.2, periods=280, breakout=False),
+    }
+
+    def __init__(self, cfg, refresh: bool = False):
+        self.cfg = cfg
+        self.refresh = refresh
+
+    def etf_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+        df = self.etf_data[str(code).zfill(6)].copy()
+        df.attrs["data_provider"] = "deterministic_etf"
+        return df
+
+
+class FailingEtfFetcher:
+    def __init__(self, cfg, refresh: bool = False):
+        self.cfg = cfg
+        self.refresh = refresh
+
+    def etf_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+        raise RuntimeError("NameResolutionError: Failed to resolve ETF source")
+
+
 def comparable_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "code" in out.columns:
@@ -241,6 +267,89 @@ class OfflineRegressionTests(unittest.TestCase):
             )()
             trading = hot_pool.build_trading_pool(args)
             self.assertEqual(trading["code"].tolist(), ["600519", "000002"])
+
+    def test_etf_pool_reader_accepts_common_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "etf_pool.csv"
+            path.write_text(
+                "ETF代码,ETF名称,跟踪指数\n"
+                "SH510300,沪深300ETF,沪深300\n"
+                "159915,创业板ETF,创业板指\n"
+                "bad,无效,忽略\n",
+                encoding="utf-8-sig",
+            )
+            pool = etf_strategy.read_etf_pool(str(path))
+            self.assertEqual(pool["code"].tolist(), ["510300", "159915"])
+            self.assertEqual(pool["category"].tolist(), ["沪深300", "创业板指"])
+
+    def test_etf_scan_writes_independent_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool_path = root / "etf_pool.csv"
+            pool_path.write_text(
+                "code,name,category\n"
+                "510300,沪深300ETF,宽基\n"
+                "159915,创业板ETF,宽基\n",
+                encoding="utf-8-sig",
+            )
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["output"]["cleanup_on_run"] = False
+            cfg["etf"]["cache_dir"] = str(root / "cache" / "etf")
+            cfg["etf"]["min_amount_ma20"] = 1
+            cfg["etf"]["score_threshold"] = 60.0
+            cfg["etf"]["max_positions"] = 2
+            out_dir = root / "etf_out"
+
+            old_fetcher = etf_strategy.EtfFetcher
+            try:
+                etf_strategy.EtfFetcher = DeterministicEtfFetcher
+                allocated, candidates, msg_path = etf_strategy.scan_etf(
+                    str(pool_path),
+                    cfg,
+                    str(out_dir),
+                    account=100000.0,
+                    refresh=False,
+                    limit=0,
+                )
+            finally:
+                etf_strategy.EtfFetcher = old_fetcher
+
+            self.assertTrue(msg_path.exists())
+            self.assertTrue((out_dir / "latest_etf_signals.csv").exists())
+            self.assertTrue((out_dir / "latest_etf_candidates.csv").exists())
+            self.assertFalse((out_dir / "latest_signals.csv").exists())
+            self.assertIn("510300", candidates["code"].astype(str).tolist())
+            self.assertGreaterEqual(len(allocated), 1)
+            self.assertTrue(allocated["code"].astype(str).str.contains("510300").any())
+
+    def test_etf_scan_handles_all_data_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool_path = root / "etf_pool.csv"
+            pool_path.write_text("code,name,category\n510300,沪深300ETF,宽基\n", encoding="utf-8-sig")
+            cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+            cfg["output"]["cleanup_on_run"] = False
+            cfg["etf"]["cache_dir"] = str(root / "cache" / "etf")
+            out_dir = root / "etf_out"
+
+            old_fetcher = etf_strategy.EtfFetcher
+            try:
+                etf_strategy.EtfFetcher = FailingEtfFetcher
+                allocated, candidates, _ = etf_strategy.scan_etf(
+                    str(pool_path),
+                    cfg,
+                    str(out_dir),
+                    account=100000.0,
+                    refresh=False,
+                    limit=0,
+                )
+            finally:
+                etf_strategy.EtfFetcher = old_fetcher
+
+            self.assertTrue(allocated.empty)
+            self.assertEqual(float(candidates.iloc[0]["score"]), 0.0)
+            self.assertIn("数据错误", str(candidates.iloc[0]["filter_reason"]))
+            self.assertTrue((out_dir / "latest_etf_errors.csv").exists())
 
     def test_add_indicators_stable_columns(self) -> None:
         dates = pd.date_range("2025-01-01", periods=130, freq="D")

@@ -330,6 +330,30 @@ output/latest_hot_pool_top100.csv     最新热榜Top100
 DNS/超时类网络错误时，会快速回退本地旧缓存；自动板块映射也会使用旧缓存兜底，避免
 冷缓存时先全市场反查板块。
 
+### ETF 独立策略
+
+ETF 策略和个股策略是两条独立链路：使用单独的 `etf_pool.csv`、`cache/etf` 和
+`etf_output`，不会读取或写入 `stock_pool.csv`、`output/latest_signals.csv` 等个股文件。
+
+```bash
+# 先从样例复制一个ETF池，再按需要增删
+cp etf_pool_sample.csv etf_pool.csv
+
+# 生成ETF交易信号
+python etf_strategy.py --pool etf_pool.csv --config config.example.yml --out etf_output --account 100000
+```
+
+ETF 策略模型为：趋势动量 + 平台突破/缩量回踩 + ATR 止损 + 风险平价仓位。ETF 日线默认
+按 `eastmoney -> sina` 顺序获取，单个数据源失败时会自动尝试下一个数据源。输出：
+
+```text
+etf_output/latest_etf_message.txt         精简摘要
+etf_output/latest_etf_signals.csv         ETF买入配置
+etf_output/latest_etf_candidates.csv      ETF候选评分
+etf_output/latest_etf_report.md           ETF策略报告
+cache/etf/etf_CODE_adjust_START_END.csv   ETF历史K缓存
+```
+
 ## 7. 输出文件
 
 ```text

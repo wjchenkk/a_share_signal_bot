@@ -165,6 +165,49 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "min_cooling_days_after_limit_down": 5
         },
     },
+    "etf": {
+        "pool": "etf_pool.csv",
+        "out_dir": "etf_output",
+        "cache_dir": "cache/etf",
+        "start_date": "20200101",
+        "end_date": "",
+        "adjust": "",
+        "hist_providers": ["eastmoney", "sina"],
+        "cache_hours": 24,
+        "sleep_seconds": 0.20,
+        "request_retries": 2,
+        "retry_backoff_seconds": [1.0, 3.0],
+        "allow_stale_cache_on_error": True,
+        "use_stale_cache_on_network_error": True,
+        "fail_fast_network_errors": True,
+        "min_history_days": 180,
+        "min_amount_ma20": 20_000_000,
+        "score_threshold": 70.0,
+        "max_positions": 5,
+        "max_position_pct": 0.25,
+        "total_exposure": 0.90,
+        "min_lot": 100,
+        "trend": {
+            "min_trend_score": 20.0
+        },
+        "setup": {
+            "min_setup_score": 16.0,
+            "breakout_amount_min": 1.05,
+            "breakout_amount_max": 2.60,
+            "pullback_ma20_distance_pct": 0.035,
+            "pullback_amount_dryup_max": 1.05,
+            "max_chase_day_pct": 5.5,
+            "min_day_pct": -4.5
+        },
+        "risk": {
+            "atr_period": 14,
+            "atr_mult": 2.2,
+            "min_stop_pct": 0.025,
+            "max_stop_pct": 0.10,
+            "max_atr_pct": 0.085,
+            "max_drawdown120": -0.24
+        },
+    },
     "position_monitor": {
         "portfolio_path": "portfolio.csv",
         "out_dir": "position_output",

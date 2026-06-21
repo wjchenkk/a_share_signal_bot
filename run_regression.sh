@@ -14,7 +14,7 @@ else
 fi
 
 "$py" -m unittest discover -s tests -p 'test_*.py'
-"$py" -m compileall -q main.py backtest.py backtest_position_strategy.py hot_pool.py portfolio_manager.py position_monitor.py trade_manager.py
+"$py" -m compileall -q main.py backtest.py backtest_position_strategy.py hot_pool.py portfolio_manager.py position_monitor.py trade_manager.py etf_strategy.py
 if [ -d a_share_signal_bot ]; then
   "$py" -m compileall -q a_share_signal_bot
 fi
