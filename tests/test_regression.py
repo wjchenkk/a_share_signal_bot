@@ -485,6 +485,44 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertEqual(len(today_window), 1)
         self.assertEqual(note, "")
 
+    def test_position_monitor_does_not_add_without_fresh_realtime(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["position_monitor"]["minute_providers"] = ["snapshot"]
+        cfg["position_monitor"]["minute_allow_snapshot_fallback"] = False
+        market = bot.MarketState(
+            date="20260621",
+            score=80.0,
+            regime="strong",
+            target_exposure=0.95,
+            details=pd.DataFrame(),
+            summary="市场强势",
+            market_ret20=0.05,
+            market_ret60=0.10,
+        )
+
+        class UptrendFetcher:
+            def stock_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+                return deterministic_hist(18.0, 30.0, periods=280, breakout=False)
+
+        stale_spot = pd.DataFrame(
+            [
+                {"代码": "600519", "最新价": 30.5, "涨跌幅": 2.0, "最高": 31.0, "最低": 29.5, "成交额": 1_000_000_000},
+            ]
+        )
+        stale_spot.attrs["data_provider"] = "stale_cache"
+        action = position_monitor.analyze_position(
+            pd.Series({"code": "600519", "name": "贵州茅台", "shares": 100, "cost_price": 20.0}),
+            cfg,
+            UptrendFetcher(),
+            market,
+            stale_spot,
+            total_equity=200000.0,
+            inferred_cash=100000.0,
+        )
+        self.assertNotEqual(action["action"], "ADD")
+        self.assertEqual(action["trade_shares"], 0)
+        self.assertIn("实时行情为旧缓存", action["intraday_note"])
+
     def test_trade_manager_expires_stale_pending_buys(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
         cfg.setdefault("trade_lifecycle", {})["pending_buy_expire_days"] = 5
@@ -518,6 +556,56 @@ class OfflineRegressionTests(unittest.TestCase):
         missing_date, note = trade_manager.filter_fresh_signals(signals.drop(columns=["date"]), cfg, pd.Timestamp("2026-06-21"))
         self.assertTrue(missing_date.empty)
         self.assertIn("缺少信号日期", note)
+
+    def test_trade_manager_intraday_stop_requires_fresh_realtime(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        market = bot.MarketState(
+            date="20260621",
+            score=70.0,
+            regime="neutral",
+            target_exposure=0.65,
+            details=pd.DataFrame(),
+            summary="市场中性",
+            market_ret20=0.02,
+            market_ret60=0.04,
+        )
+
+        class FlatFetcher:
+            def stock_hist(self, code: str, start_date: str, end_date: str, adjust: str) -> pd.DataFrame:
+                return deterministic_hist(10.0, 10.0, periods=280, breakout=False)
+
+        state = pd.DataFrame(
+            [
+                {
+                    "code": "600001",
+                    "name": "测试股",
+                    "status": "ACTIVE",
+                    "entry_date": "2026-06-01",
+                    "entry_price": 12.0,
+                    "shares": 100,
+                    "stop_loss": 11.0,
+                    "take_profit_1": 14.0,
+                    "take_profit_2": 16.0,
+                    "tp1_done": False,
+                }
+            ]
+        )
+        _, actions, notes = trade_manager.advise_active_positions(
+            state,
+            cfg,
+            FlatFetcher(),
+            market,
+            pd.DataFrame(),
+            mode="intraday",
+            allow_add=True,
+            total_equity=200000.0,
+            cash=100000.0,
+            latest_signals=pd.DataFrame(),
+        )
+        self.assertIn("实时行情缺失", "；".join(notes))
+        self.assertEqual(actions.iloc[0]["action"], "WARN")
+        self.assertEqual(int(actions.iloc[0]["trade_shares"]), 0)
+        self.assertIn("实时行情不可用", actions.iloc[0]["reason"])
 
     def test_trade_manager_run_does_not_create_plan_from_stale_latest_signals(self) -> None:
         with tempfile.TemporaryDirectory() as td:

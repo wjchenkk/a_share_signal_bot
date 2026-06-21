@@ -272,6 +272,7 @@ def analyze_position(
 
     stale_spot = bot.is_stale_data_frame(spot_all)
     spot = {} if stale_spot else current_spot_row(spot_all, code)
+    has_fresh_realtime = bool(spot)
     current = bot.safe_float(spot.get("price"), bot.safe_float(last.get("close")))
     if not np.isfinite(current) or current <= 0:
         current = bot.safe_float(last.get("close"))
@@ -341,9 +342,9 @@ def analyze_position(
         if bool(pm.get("allow_add", True)) and market.target_exposure > 0 and inferred_cash > current * 100:
             add_cap = float(pm.get("add_max_position_pct", 0.18))
             trend_ok = np.isfinite(ma5) and np.isfinite(ma10) and np.isfinite(ma20) and current >= ma5 >= ma10 >= ma20
-            intraday_strong = (not np.isfinite(intraday_vwap)) or current >= intraday_vwap * 1.002
+            intraday_strong = np.isfinite(intraday_vwap) and current >= intraday_vwap * 1.002
             not_chasing = not np.isfinite(pct_chg) or pct_chg <= 4.8
-            if trend_ok and intraday_strong and not_chasing and (not np.isfinite(weight) or weight < add_cap * 0.75):
+            if has_fresh_realtime and trend_ok and intraday_strong and not_chasing and (not np.isfinite(weight) or weight < add_cap * 0.75):
                 target_value = min(total_equity * add_cap, market_value + total_equity * float(pm.get("add_step_pct", 0.25)) * add_cap)
                 buy_cash = max(0.0, min(target_value - market_value, inferred_cash))
                 buy_shares = round_lot(buy_cash / current, int(pm.get("min_trade_lot", 100)))
@@ -351,6 +352,9 @@ def analyze_position(
                     action = "ADD"; action_cn = "趋势加仓"; trade_shares = buy_shares; mode = "buy"
                     reasons.append("趋势强、盘中强于VWAP且仓位未到上限，可小步加仓")
 
+    if trade_shares > 0 and not has_fresh_realtime:
+        reasons.append("实时行情不可用，原交易动作降级为预警，需确认盘口后执行")
+        action = "WARN"; action_cn = "实时价缺失预警"; trade_shares = 0; mode = "hold"
     if trade_shares > shares and action in {"SELL", "REDUCE", "TAKE_PROFIT"}:
         trade_shares = round_lot(shares, int(pm.get("min_trade_lot", 100)))
     result.update({

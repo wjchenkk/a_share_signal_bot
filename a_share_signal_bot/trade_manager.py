@@ -492,8 +492,9 @@ def current_spot_map(fetcher: bot.AkshareFetcher) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def current_price_from_spot_or_hist(code: str, spot: pd.DataFrame, hist: pd.DataFrame) -> Tuple[float, Dict[str, float]]:
+def current_price_from_spot_or_hist(code: str, spot: pd.DataFrame, hist: pd.DataFrame) -> Tuple[float, Dict[str, float], str]:
     row = {}
+    source = "hist"
     if position_monitor is not None and spot is not None and not spot.empty and not bot.is_stale_data_frame(spot):
         try:
             row = position_monitor.current_spot_row(spot, code)
@@ -502,7 +503,9 @@ def current_price_from_spot_or_hist(code: str, spot: pd.DataFrame, hist: pd.Data
     price = safe_float(row.get("price")) if row else np.nan
     if not np.isfinite(price) or price <= 0:
         price = safe_float(hist.iloc[-1].get("close")) if hist is not None and not hist.empty else np.nan
-    return price, row
+    else:
+        source = "spot"
+    return price, row, source
 
 
 def should_limit_down_locked(code: str, name: str, current: float, hist: pd.DataFrame) -> bool:
@@ -567,6 +570,12 @@ def advise_active_positions(
     active = state[state["status"].astype(str).eq("ACTIVE")].copy()
     latest_signals = latest_signals if latest_signals is not None else pd.DataFrame()
     signal_codes = set(latest_signals["code"].astype(str)) if not latest_signals.empty else set()
+    intraday_mode = mode not in {"close", "after_close", "daily"}
+    if intraday_mode:
+        if spot is None or spot.empty:
+            notes.append("实时行情缺失，盘中价格触发类动作已降级为预警")
+        elif bot.is_stale_data_frame(spot):
+            notes.append("实时行情为旧缓存，盘中价格触发类动作已降级为预警")
     for idx, row in active.iterrows():
         code = normalize_code(row.get("code"))
         name = str(row.get("name", ""))
@@ -580,7 +589,8 @@ def advise_active_positions(
         except Exception as exc:
             add_action(actions, row, "DATA_ERROR", "数据错误", 0, np.nan, "不交易", f"日K获取失败：{exc}", "hold")
             continue
-        current, spot_row = current_price_from_spot_or_hist(code, spot, hist)
+        current, spot_row, price_source = current_price_from_spot_or_hist(code, spot, hist)
+        no_intraday_price = intraday_mode and price_source != "spot"
         close = safe_float(last.get("close"))
         high = safe_float(last.get("high")); low = safe_float(last.get("low"))
         ma20 = safe_float(last.get("ma20")); ma60 = safe_float(last.get("ma60"))
@@ -604,6 +614,9 @@ def advise_active_positions(
         try:
             risk_gate = bot.compute_risk_gate(ind, code, name, cfg)
             if bool(risk_gate.get("risk_gate_block", False)):
+                if no_intraday_price:
+                    add_action(actions, row, "WARN", "实时价缺失风险预警", 0, current, "不交易", "实时行情不可用，仅按日K提示风险：" + str(risk_gate.get("risk_gate_reason", "")), "hold")
+                    continue
                 if should_limit_down_locked(code, name, current, hist):
                     add_action(actions, row, "SELL_RISK_BLOCKED", "风险卖出但可能跌停难成交", shares, current, "尽量卖出；若封死则继续挂单/次日处理", "A股风险闸门触发：" + str(risk_gate.get("risk_gate_reason", "")), "urgent_sell")
                 else:
@@ -613,15 +626,24 @@ def advise_active_positions(
             pass
         # 盘中价格触发的止损/止盈，和回测一样可用 high/low 逻辑；实时建议用 current 触发。
         if np.isfinite(stop) and np.isfinite(current) and current <= stop:
+            if no_intraday_price:
+                add_action(actions, row, "WARN", "实时价缺失预警", 0, current, "不交易", f"实时行情不可用，仅按日K价格{current:.2f}发现低于止损{stop:.2f}，需确认实时盘口", "hold")
+                continue
             if should_limit_down_locked(code, name, current, hist):
                 add_action(actions, row, "STOP_BLOCKED", "止损触发但可能跌停难成交", shares, current, "尽量卖出；若封死则继续挂单/次日处理", f"现价{current:.2f}跌破止损{stop:.2f}", "urgent_sell")
             else:
                 add_action(actions, row, "STOP_LOSS", "止损卖出", shares, current, "盘中触发即可执行", f"现价{current:.2f}跌破止损{stop:.2f}", "urgent_sell")
             continue
         if np.isfinite(tp2) and np.isfinite(current) and current >= tp2:
+            if no_intraday_price:
+                add_action(actions, row, "WARN", "实时价缺失预警", 0, current, "不交易", f"实时行情不可用，仅按日K价格{current:.2f}发现达到3R止盈{tp2:.2f}，需确认实时盘口", "hold")
+                continue
             add_action(actions, row, "TAKE_PROFIT_3R", "3R止盈清仓", shares, current, "盘中触发即可执行", f"现价{current:.2f}达到3R止盈{tp2:.2f}", "sell")
             continue
         if (not tp1_done) and np.isfinite(tp1) and np.isfinite(current) and current >= tp1:
+            if no_intraday_price:
+                add_action(actions, row, "WARN", "实时价缺失预警", 0, current, "不交易", f"实时行情不可用，仅按日K价格{current:.2f}发现达到1.5R止盈{tp1:.2f}，需确认实时盘口", "hold")
+                continue
             half = round_lot(shares / 2)
             if half >= 100:
                 add_action(actions, row, "TAKE_PROFIT_1_5R", "1.5R止盈半仓", half, current, "盘中触发即可执行；成交后同步持仓，剩余止损抬到成本", f"现价{current:.2f}达到1.5R止盈{tp1:.2f}", "sell")
@@ -650,17 +672,18 @@ def advise_active_positions(
                 continue
         else:
             warn = []
-            if np.isfinite(ma20) and np.isfinite(current) and current < ma20 and hold_days >= 3:
-                warn.append(f"盘中跌破MA20 {ma20:.2f}，收盘若不能收回则明日开盘卖出")
-            if np.isfinite(ma60) and np.isfinite(current) and current < ma60:
-                warn.append(f"盘中跌破MA60 {ma60:.2f}，收盘确认则明日开盘卖出")
+            if not no_intraday_price:
+                if np.isfinite(ma20) and np.isfinite(current) and current < ma20 and hold_days >= 3:
+                    warn.append(f"盘中跌破MA20 {ma20:.2f}，收盘若不能收回则明日开盘卖出")
+                if np.isfinite(ma60) and np.isfinite(current) and current < ma60:
+                    warn.append(f"盘中跌破MA60 {ma60:.2f}，收盘确认则明日开盘卖出")
             if market.regime == "weak":
                 warn.append("大盘弱势，收盘确认后可能触发明日开盘退出")
             if warn:
                 add_action(actions, row, "WARN", "趋势/大盘预警", 0, current, "盘中不按MA破位直接卖；收盘确认后再挂次日开盘单", "；".join(warn), "hold")
                 continue
         # 加仓建议：不属于严格回测默认卖出，但用于实盘计划，必须保守且依赖当前仍有买入信号/主线强。
-        if allow_add and code in signal_codes and market.target_exposure > 0:
+        if (not no_intraday_price) and allow_add and code in signal_codes and market.target_exposure > 0:
             entry = safe_float(row.get("entry_price"))
             max_add_pct = float(cfg.get("trade_lifecycle", {}).get("add_max_position_pct", 0.18))
             add_step_pct = float(cfg.get("trade_lifecycle", {}).get("add_step_pct", 0.25))
