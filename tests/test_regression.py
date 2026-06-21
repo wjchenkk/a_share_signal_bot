@@ -14,6 +14,7 @@ import pandas as pd
 
 import main as bot
 from a_share_signal_bot.market_data import AkshareFetcher
+from a_share_signal_bot import market_data
 from a_share_signal_bot import hot_pool
 from a_share_signal_bot import base as bot_base
 from a_share_signal_bot import etf_strategy
@@ -270,6 +271,62 @@ class OfflineRegressionTests(unittest.TestCase):
             self.assertEqual(calls, ["tencent"])
             self.assertEqual(df.attrs.get("data_provider"), "stale_cache")
             self.assertGreaterEqual(len(df), 200)
+
+    def test_index_tail_skips_stale_snapshot_after_last_trade_day(self) -> None:
+        hist = deterministic_hist(3000.0, 3600.0, periods=220)
+        hist["date"] = pd.date_range(end="2026-06-18", periods=len(hist), freq="B")
+        last = hist.iloc[-1]
+        spot = pd.DataFrame(
+            [
+                {
+                    "代码": "sh000001",
+                    "最新价": last["close"],
+                    "今开": last["open"],
+                    "最高": last["high"],
+                    "最低": last["low"],
+                    "成交量": last["volume"],
+                    "成交额": last["amount"],
+                }
+            ]
+        )
+        old_now = market_data.now_cn
+        try:
+            market_data.now_cn = lambda: pd.Timestamp("2026-06-19 14:55")  # type: ignore[assignment]
+            out = market_data.merge_index_tail_realtime(hist, spot, "sh000001")
+        finally:
+            market_data.now_cn = old_now  # type: ignore[assignment]
+        self.assertEqual(len(out), len(hist))
+        self.assertEqual(pd.Timestamp(out.iloc[-1]["date"]).strftime("%Y-%m-%d"), "2026-06-18")
+
+    def test_stock_tail_appends_changed_realtime_snapshot(self) -> None:
+        hist = deterministic_hist(10.0, 12.0, periods=220)
+        hist["date"] = pd.date_range(end="2026-06-18", periods=len(hist), freq="B")
+        last = hist.iloc[-1]
+        latest = float(last["close"]) * 1.01
+        spot = pd.DataFrame(
+            [
+                {
+                    "代码": "600519",
+                    "最新价": latest,
+                    "今开": float(last["open"]),
+                    "最高": latest,
+                    "最低": float(last["low"]),
+                    "成交量": float(last["volume"]) + 1000,
+                    "成交额": float(last["amount"]) + 1000000,
+                    "涨跌幅": 1.0,
+                    "换手率": 1.2,
+                }
+            ]
+        )
+        old_now = market_data.now_cn
+        try:
+            market_data.now_cn = lambda: pd.Timestamp("2026-06-19 14:55")  # type: ignore[assignment]
+            out = market_data.merge_stock_tail_realtime(hist, spot, "600519")
+        finally:
+            market_data.now_cn = old_now  # type: ignore[assignment]
+        self.assertEqual(len(out), len(hist) + 1)
+        self.assertEqual(pd.Timestamp(out.iloc[-1]["date"]).strftime("%Y-%m-%d"), "2026-06-19")
+        self.assertAlmostEqual(float(out.iloc[-1]["close"]), latest)
 
     def test_trading_pool_can_require_local_history(self) -> None:
         with tempfile.TemporaryDirectory() as td:

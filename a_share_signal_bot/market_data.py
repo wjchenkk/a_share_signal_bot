@@ -896,6 +896,8 @@ def merge_stock_tail_realtime(hist: pd.DataFrame, spot_all: pd.DataFrame, code: 
     if not np.isfinite(latest) or latest <= 0:
         return hist
     today = pd.Timestamp(now_cn().date())
+    if _should_skip_realtime_tail(hist, today, latest, f("今开"), f("最高"), f("最低"), f("成交量"), f("成交额")):
+        return hist
     new_row = {
         "date": today,
         "code": normalize_code(code),
@@ -944,6 +946,8 @@ def merge_index_tail_realtime(hist: pd.DataFrame, index_spot: pd.DataFrame, symb
     if not np.isfinite(latest) or latest <= 0:
         return hist
     today = pd.Timestamp(now_cn().date())
+    if _should_skip_realtime_tail(hist, today, latest, f("今开"), f("最高"), f("最低"), f("成交量"), f("成交额")):
+        return hist
     new_row = {
         "date": today,
         "open": f("今开"),
@@ -964,6 +968,50 @@ def merge_index_tail_realtime(hist: pd.DataFrame, index_spot: pd.DataFrame, symb
     out = out.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
     out.attrs.update(getattr(hist, "attrs", {}))
     return out
+
+
+def _close_enough(a: float, b: float, rel_tol: float = 1e-5, abs_tol: float = 1e-3) -> bool:
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return False
+    return abs(float(a) - float(b)) <= max(abs_tol, rel_tol * max(abs(float(a)), abs(float(b)), 1.0))
+
+
+def _should_skip_realtime_tail(
+    hist: pd.DataFrame,
+    today: pd.Timestamp,
+    close: float,
+    open_px: float,
+    high: float,
+    low: float,
+    volume: float,
+    amount: float,
+) -> bool:
+    if hist is None or hist.empty:
+        return False
+    today = pd.Timestamp(today).normalize()
+    dates = pd.to_datetime(hist.get("date"), errors="coerce").dropna()
+    if dates.empty:
+        return False
+    last_date = pd.Timestamp(dates.iloc[-1]).normalize()
+    if today < last_date:
+        return True
+    if today == last_date:
+        return False
+    if today.weekday() >= 5:
+        return True
+
+    last = hist.iloc[-1]
+    checks = [
+        _close_enough(close, safe_float(last.get("close"))),
+        _close_enough(open_px, safe_float(last.get("open"))),
+        _close_enough(high, safe_float(last.get("high"))),
+        _close_enough(low, safe_float(last.get("low"))),
+    ]
+    if np.isfinite(volume) and np.isfinite(safe_float(last.get("volume"))):
+        checks.append(_close_enough(volume, safe_float(last.get("volume")), rel_tol=1e-4, abs_tol=1.0))
+    if np.isfinite(amount) and np.isfinite(safe_float(last.get("amount"))):
+        checks.append(_close_enough(amount, safe_float(last.get("amount")), rel_tol=1e-4, abs_tol=1.0))
+    return bool(checks) and all(checks)
 
 
 def add_indicators(df: pd.DataFrame, atr_period: int = 14) -> pd.DataFrame:
