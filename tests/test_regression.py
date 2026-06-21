@@ -608,6 +608,35 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertLessEqual(broad_weight, 0.2500001)
         self.assertGreaterEqual(defensive_weight, 0.20)
 
+    def test_etf_rotation_strong_regime_keeps_core_broad_position(self) -> None:
+        cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
+        cfg["etf"]["rotation"]["max_positions"] = 2
+        cfg["etf"]["rotation"]["max_per_category"] = 2
+        cfg["etf"]["rotation"]["max_position_pct"] = 0.50
+        cfg["etf"]["rotation"]["max_correlation"] = 1.0
+        cfg["etf"]["rotation"]["core_broad_regimes"] = ["strong"]
+        cfg["etf"]["rotation"]["core_broad_min_score"] = 55.0
+        candidates = pd.DataFrame(
+            [
+                {"code": "511010", "name": "国债ETF", "category": "债券", "asset_class": "defensive", "is_rotation_candidate": True, "rotation_score": 78.0, "atr_pct": 0.006, "close": 1.1},
+                {"code": "510300", "name": "沪深300ETF", "category": "宽基", "asset_class": "broad", "is_rotation_candidate": True, "rotation_score": 60.0, "atr_pct": 0.020, "close": 4.0},
+                {"code": "512880", "name": "证券ETF", "category": "证券", "asset_class": "sector", "is_rotation_candidate": True, "rotation_score": 72.0, "atr_pct": 0.030, "close": 1.2},
+            ]
+        )
+        hist_map = {
+            "511010": deterministic_hist(1.0, 1.1, periods=260),
+            "510300": deterministic_hist(3.0, 4.0, periods=260),
+            "512880": deterministic_hist(1.0, 1.8, periods=260),
+        }
+        positions = etf_rotation.select_rotation_positions(
+            candidates,
+            hist_map,
+            cfg,
+            account=100000.0,
+            regime={"regime": "strong", "target_exposure": 0.90, "summary": "测试强势"},
+        )
+        self.assertIn("510300", positions["code"].astype(str).tolist())
+
     def test_etf_rotation_rejects_low_history_coverage(self) -> None:
         cfg = copy.deepcopy(bot.DEFAULT_CONFIG)
         cfg["etf"]["max_error_rate_for_valid_run"] = 0.20
@@ -653,6 +682,7 @@ class OfflineRegressionTests(unittest.TestCase):
         self.assertIn("total_return", summary)
         self.assertIn("max_drawdown", summary)
         self.assertIn("benchmark_total_return", summary)
+        self.assertEqual(summary.get("benchmark_code"), "510300")
         self.assertTrue(np.isfinite(float(summary["benchmark_total_return"])))
         self.assertGreaterEqual(len(rebalances), 1)
 

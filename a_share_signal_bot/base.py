@@ -240,6 +240,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "max_position_pct": 0.25,
             "max_correlation": 0.92,
             "correlation_lookback": 120,
+            "core_broad_regimes": ["strong", "neutral"],
+            "core_broad_min_score": 55.0,
             "strong_ret60": 0.04,
             "neutral_ret60": 0.00,
             "strong_above_ma60_rate": 0.60,
@@ -282,7 +284,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "rebalance": "W-FRI",
             "commission_rate": 0.0003,
             "slippage_bps": 5,
-            "benchmark_code": ""
+            "benchmark_code": "510300"
         },
     },
     "position_monitor": {

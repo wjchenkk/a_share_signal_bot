@@ -390,8 +390,26 @@ def select_rotation_positions(
     selected_codes: List[str] = []
     category_counts: Dict[str, int] = {}
     skip_notes: Dict[str, str] = {}
+
+    core_broad_regimes = set(str(x) for x in rot_cfg.get("core_broad_regimes", []))
+    core_broad_min_score = float(rot_cfg.get("core_broad_min_score", 55.0))
+    if regime_name in core_broad_regimes:
+        broad_pool = pool[
+            pool["asset_class"].astype(str).eq("broad")
+            & (pd.to_numeric(pool["selection_score"], errors="coerce").fillna(0.0) >= core_broad_min_score)
+        ].copy()
+        if not broad_pool.empty:
+            broad_row = broad_pool.sort_values(["selection_score", "rotation_score"], ascending=[False, False]).iloc[0]
+            selected.append(broad_row)
+            code = normalize_code(broad_row.get("code", ""))
+            selected_codes.append(code)
+            category = str(broad_row.get("category", "未分组") or "未分组")
+            category_counts[category] = category_counts.get(category, 0) + 1
+
     for _, row in pool.iterrows():
         code = normalize_code(row.get("code", ""))
+        if code in selected_codes:
+            continue
         category = str(row.get("category", "未分组") or "未分组")
         if category_counts.get(category, 0) >= max_per_category:
             skip_notes[code] = f"同类别{category}已达上限"
@@ -654,12 +672,14 @@ def backtest_rotation(
     if not benchmark_code:
         broad = pool[pool.apply(lambda r: classify_asset_class(r.get("name", ""), r.get("category", "")) == "broad", axis=1)]
         benchmark_code = normalize_code(broad.iloc[0]["code"] if not broad.empty else pool.iloc[0]["code"])
+    summary_benchmark_code = normalize_code(benchmark_code)
     if benchmark_code in closes.columns and not equity_df.empty:
         bench = closes[benchmark_code].reindex(pd.to_datetime(equity_df["date"]))
         bench = bench.ffill()
         if bench.notna().any() and bench.dropna().iloc[0] > 0:
             equity_df["benchmark_equity"] = (float(account) * bench / bench.dropna().iloc[0]).to_numpy()
     summary = summarize_equity(equity_df, total_turnover)
+    summary["benchmark_code"] = summary_benchmark_code
     if "benchmark_equity" in equity_df.columns:
         summary["benchmark_total_return"] = float(equity_df["benchmark_equity"].iloc[-1] / equity_df["benchmark_equity"].iloc[0] - 1.0)
         summary["benchmark_max_drawdown"] = max_drawdown(equity_df["benchmark_equity"])
@@ -743,6 +763,7 @@ def write_backtest_outputs(out_dir: Path, equity: pd.DataFrame, rebalances: pd.D
         lines.append(f"- 最大回撤：{safe_float(summary.get('max_drawdown'), 0):.2%}")
         lines.append(f"- 夏普：{safe_float(summary.get('sharpe'), np.nan):.2f}")
         if "benchmark_total_return" in summary:
+            lines.append(f"- 基准代码：{summary.get('benchmark_code', '')}")
             lines.append(f"- 基准总收益：{safe_float(summary.get('benchmark_total_return'), 0):.2%}")
             lines.append(f"- 基准最大回撤：{safe_float(summary.get('benchmark_max_drawdown'), 0):.2%}")
         lines.append(f"- 再平衡次数：{summary.get('rebalance_count', 0)}")
