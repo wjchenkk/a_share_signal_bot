@@ -381,6 +381,15 @@ printf '%s\n' 'ETF轮动回测' | ./stockbot_chat.sh
 printf '%s\n' 'ETF轮动配置' | ETF_POOL=/path/to/etf_pool.csv ACCOUNT=200000 ./stockbot_chat.sh
 ```
 
+日常运行可以使用专用脚本，一次生成 ETF 买点信号和 ETF 轮动配置：
+
+```bash
+ACCOUNT=200000 ETF_POOL=etf_pool.csv ./run_etf_daily.sh
+
+# 需要强制刷新行情缓存时
+REFRESH=1 ACCOUNT=200000 ETF_POOL=etf_pool.csv ./run_etf_daily.sh
+```
+
 轮动策略会按全ETF池横截面排序，而不是只判断单只ETF是否出现买点。主要因子包括：
 20/60/120日动量、均线趋势、区间位置、波动率、回撤、流动性。组合层面会限制同类ETF数量，
 并跳过与已选ETF高度相关的重复暴露；市场弱时降低总权益仓位，并给债券/黄金等防守资产额外权重。

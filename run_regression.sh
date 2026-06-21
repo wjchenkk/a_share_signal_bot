@@ -15,6 +15,7 @@ fi
 
 "$py" -m unittest discover -s tests -p 'test_*.py'
 bash -n stockbot_chat.sh
+bash -n run_etf_daily.sh
 "$py" -m compileall -q main.py backtest.py backtest_position_strategy.py hot_pool.py portfolio_manager.py position_monitor.py trade_manager.py etf_strategy.py etf_rotation.py
 if [ -d a_share_signal_bot ]; then
   "$py" -m compileall -q a_share_signal_bot

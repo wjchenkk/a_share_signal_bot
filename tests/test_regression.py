@@ -529,6 +529,12 @@ class OfflineRegressionTests(unittest.TestCase):
         stock_backtest_pos = script.index("python backtest.py")
         self.assertLess(etf_backtest_pos, stock_backtest_pos)
 
+    def test_run_etf_daily_runs_signal_and_rotation(self) -> None:
+        script = (ROOT / "run_etf_daily.sh").read_text(encoding="utf-8")
+        self.assertIn("etf_strategy.py", script)
+        self.assertIn("etf_rotation.py", script)
+        self.assertIn("latest_etf_rotation_message.txt", script)
+
     def test_golden_master_full_scan_matches_backup_main(self) -> None:
         self.assertTrue(OLD_MAIN_PATH.exists(), f"缺少旧版源码备份: {OLD_MAIN_PATH}")
         old = load_old_main_module()
